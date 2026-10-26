@@ -52,7 +52,8 @@ Three `node:test` suites under `test/` with no new dependencies. Sources load th
 - ✅ Manual review of cache-key invalidation, degrade paths, dispose ordering, cancel paths
 - ✅ **52 behaviour tests, 52 pass / 0 fail** (`test/render-cache-smoke.mjs`, `test/merge-semantic-checks-smoke.mjs`, `test/worker-pool-smoke.mjs`), stable across repeated runs
 - ✅ Fixed a real bug the tests exposed: `prewarm()` now parks workers in the idle queue via the shared `park()` path (previously prewarmed workers were live but never handed out, hanging the first `run()`)
-- ⚠️ Not run: `pnpm typecheck` / build / integration tests (requires full dependency install incl. native bindings; not available in this environment)
+- ✅ **Real-SDK verification (CI-equivalent)**: dependencies installed from the (publicly reachable) insider registry; `pnpm run typecheck` (all 4 tsconfig projects, strict), full build, host-smoke, integration-smoke (end-to-end), unit-comparison-viewer (16 files/99 tests), and all other smokes **pass**; 55 behaviour tests pass
+- ⚠️ `test/univerfile-migration.mjs` fails with `ERR_REQUIRE_CYCLE_MODULE` — fails identically on unmodified `main`; Node v22.13.1 environment issue (required ≥22.19), unrelated to these changes
 
 ### Behaviour tests
 

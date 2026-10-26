@@ -22,6 +22,7 @@ export { UniverfileSQLiteHistoryDatabaseAdapter } from './database-adapters/hist
 export type { UniverfileSQLiteHistoryDatabaseAdapterOptions } from './database-adapters/history-database-adapter.js'
 export type {
   UniverfileSQLiteDatabaseAdapterOptions,
+  UniverfileSnapshotCheckpointInput,
   UniverfileUnitMetadata,
   UniverfileUnitSummary
 } from './database-adapters/collaboration-database-adapter.js'

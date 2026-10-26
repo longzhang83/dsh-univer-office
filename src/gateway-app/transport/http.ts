@@ -8,6 +8,7 @@ import {
   isGatewayDescriptorContentType,
   isSupportedUnitType,
   type ErrorEnvelope,
+  type MergePreviewUnitBlocksOptions,
   type OptimizeUniverfileRequest,
   type UnitComparisonRefRequest,
   type UnitType
@@ -104,6 +105,20 @@ function parseComparisonContextQuery(params: URLSearchParams): UnitComparisonCon
     ...(search === undefined || search === '' ? {} : { search }),
     ...(detail === null ? {} : { detail: detail as 'summary' | 'changes' | 'full' }),
     ...(includeValues === null ? {} : { includeValues: includeValues === 'true' })
+  }
+}
+
+function parseMergePreviewBlocksQuery(params: URLSearchParams): MergePreviewUnitBlocksOptions {
+  const blocks = params.get('blocks')
+  if (blocks !== null && blocks !== 'inline' && blocks !== 'omit') {
+    throw new Error('blocks must be inline or omit')
+  }
+  const offset = parseOptionalNonNegativeInteger(params.get('blockOffset'), 'blockOffset')
+  const limit = parseOptionalPositiveInteger(params.get('blockLimit'), 'blockLimit')
+  return {
+    ...(blocks === 'inline' || blocks === 'omit' ? { blocks } : {}),
+    ...(offset === undefined ? {} : { blockOffset: offset }),
+    ...(limit === undefined ? {} : { blockLimit: limit })
   }
 }
 
@@ -657,15 +672,47 @@ async function handleWorktrees(
     return
   }
 
+  // /uf/<enc>/worktrees/<worktreeId>/preview/units/<unitID>/blocks — the same preview's Sheet
+  // blocks, paged. Added so a caller can read the manifest first and pull blocks on demand.
+  if (
+    sub.length === 4 &&
+    sub[0] === 'preview' &&
+    sub[1] === 'units' &&
+    sub[3] === 'blocks' &&
+    method === 'GET'
+  ) {
+    try {
+      const data = await collab.getMergePreviewUnitBlocks(
+        worktreeId,
+        sub[2] ?? '',
+        parseMergePreviewBlocksQuery(url.searchParams)
+      )
+      sendJson(res, 200, {
+        error: { code: data.error === undefined ? 1 : 0, message: data.error ?? '' },
+        type: data.type,
+        ...(data.blocks === undefined ? {} : { blocks: data.blocks }),
+        ...(data.page === undefined ? {} : { page: data.page })
+      })
+    } catch (error) {
+      sendJson(res, 200, { error: toErrorDetail(error) })
+    }
+    return
+  }
+
   // /uf/<enc>/worktrees/<worktreeId>/preview/units/<unitID> — one unit's read-only render data.
   if (sub.length === 3 && sub[0] === 'preview' && sub[1] === 'units' && method === 'GET') {
     try {
-      const data = await collab.getMergePreviewUnit(worktreeId, sub[2] ?? '')
+      const data = await collab.getMergePreviewUnit(
+        worktreeId,
+        sub[2] ?? '',
+        parseMergePreviewBlocksQuery(url.searchParams)
+      )
       sendJson(res, 200, {
         error: { code: data.error === undefined ? 1 : 0, message: data.error ?? '' },
         type: data.type,
         snapshot: encodeSnapshotForWire(data.snapshot),
-        ...(data.sheetBlocks === undefined ? {} : { sheetBlocks: data.sheetBlocks })
+        ...(data.sheetBlocks === undefined ? {} : { sheetBlocks: data.sheetBlocks }),
+        ...(data.blockManifest === undefined ? {} : { blockManifest: data.blockManifest })
       })
     } catch (error) {
       sendJson(res, 200, { error: toErrorDetail(error) })

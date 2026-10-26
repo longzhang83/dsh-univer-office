@@ -249,6 +249,44 @@ export interface MergePreview {
 export interface MergePreviewResponse extends ErrorEnvelope, MergePreview {}
 
 /**
+ * Paging state for the Sheet blocks of one merge preview Unit.
+ *
+ * Blocks are the additive part of a Sheet or Base preview payload, so a caller can read the
+ * structure first and pull these separately.
+ */
+export interface MergePreviewBlockPage {
+  /** Zero-based index of the first block addressed by this page. */
+  offset: number
+  /** Blocks carried by this response. */
+  count: number
+  /** Blocks available for the preview snapshot. */
+  total: number
+  /** True when blocks remain below this page. */
+  hasMore: boolean
+}
+
+/**
+ * Block inventory of a merge preview Unit. Present whenever the Unit has Sheet blocks, including
+ * when they were left out of the response, so a caller can page them without materializing twice.
+ */
+export interface MergePreviewUnitBlockManifest {
+  /** Stable block identities of this preview snapshot, in stable order. */
+  blockIds: string[]
+  /** The page this response carries; `count: 0` means no block was inlined. */
+  page: MergePreviewBlockPage
+}
+
+/** Optional block selection for one merge preview Unit. Omitted values keep the legacy full payload. */
+export interface MergePreviewUnitBlocksOptions {
+  /** `inline` (default) carries the blocks; `omit` returns the snapshot and manifest only. */
+  blocks?: 'inline' | 'omit'
+  /** Zero-based index of the first block to inline. */
+  blockOffset?: number
+  /** Maximum blocks to inline, clamped by the gateway. */
+  blockLimit?: number
+}
+
+/**
  * 单个 unit 的合并预览渲染数据(`GET /uf/<enc>/worktrees/<id>/preview/units/<unitId>`)。
  * 只对 ready worktree 开放。主干已前进时 snapshot 是 OT 到当前 trunk head 的静态结果；
  * 主干未前进或 Unit 为 worktree 内新建时，snapshot 是该 worktree head。
@@ -261,6 +299,20 @@ export interface MergePreviewUnitResponse extends ErrorEnvelope {
   snapshot?: unknown
   /** Sheet / Base 的 sheet blocks(内联)；没有 block 的 Unit 省略。 */
   sheetBlocks?: unknown[]
+  /** Sheet / Base 的 block 清单与分页状态；为按需拉取块数据新增的可选字段。 */
+  blockManifest?: MergePreviewUnitBlockManifest
+}
+
+/**
+ * One page of Sheet blocks for an already materialized merge preview Unit
+ * (`GET /uf/<enc>/worktrees/<id>/preview/units/<unitId>/blocks`)。
+ */
+export interface MergePreviewUnitBlocksResponse extends ErrorEnvelope {
+  type: UnitType
+  /** The requested block page; absent when the Unit has no blocks. */
+  blocks?: unknown[]
+  /** Paging state of `blocks`. */
+  page?: MergePreviewBlockPage
 }
 
 // ---- pinned Unit comparison (worktree-diff) ----

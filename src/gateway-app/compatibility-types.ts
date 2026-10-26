@@ -1,4 +1,11 @@
-import type { MergePreview, MergeSemanticCheck, MergeUnitPreview, WorktreeStatus } from './contract/index.js'
+import type {
+  MergePreview,
+  MergeSemanticCheck,
+  MergeUnitPreview,
+  MergePreviewBlockPage,
+  MergePreviewUnitBlockManifest,
+  WorktreeStatus
+} from './contract/index.js'
 import type { IChangeset, IDeserializedSheetBlock, ISnapshot } from '@univerjs/protocol'
 
 /**
@@ -55,6 +62,15 @@ export interface MergePreviewUnitData {
   type: number
   snapshot?: ISnapshot
   sheetBlocks?: IDeserializedSheetBlock[]
+  /** Block inventory of `snapshot`; lets consumers page blocks instead of taking them inline. */
+  blockManifest?: MergePreviewUnitBlockManifest
+  error?: string
+}
+
+export interface MergePreviewUnitBlocksData {
+  type: number
+  blocks?: IDeserializedSheetBlock[]
+  page?: MergePreviewBlockPage
   error?: string
 }
 

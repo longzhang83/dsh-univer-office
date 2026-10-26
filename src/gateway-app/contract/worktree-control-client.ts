@@ -14,6 +14,8 @@ import type {
   MergeResponse,
   MergePreviewResponse,
   MergePreviewUnitResponse,
+  MergePreviewUnitBlocksResponse,
+  MergePreviewUnitBlocksOptions,
   OptimizeUniverfileRequest,
   OptimizeUniverfileResponse,
   ReadyResponse,
@@ -23,6 +25,14 @@ import type {
   UnitComparisonContextResponse,
   UnitComparisonResponse
 } from './types.js'
+
+function mergePreviewBlocksSuffix(options: MergePreviewUnitBlocksOptions): string {
+  const params = new URLSearchParams()
+  if (options.blocks !== undefined) params.set('blocks', options.blocks)
+  if (options.blockOffset !== undefined) params.set('blockOffset', String(options.blockOffset))
+  if (options.blockLimit !== undefined) params.set('blockLimit', String(options.blockLimit))
+  return params.size === 0 ? '' : `?${params.toString()}`
+}
 
 /** HTTP 层错误(non-2xx),带 status:404=univerfile 不存在、409=已存在、400=寻址非法。 */
 export class WorktreeServerHttpError extends Error {
@@ -125,13 +135,28 @@ export class WorktreeControlClient {
     return this.getJson<MergePreviewResponse>(`${this.base}/worktrees/${worktreeId}/preview`)
   }
 
-  /** 单个 ready unit 的只读合并预览。主干前进时 snapshot 含主线；Sheet 与 Base 含 sheetBlocks。 */
+  /**
+   * 单个 ready unit 的只读合并预览。主干前进时 snapshot 含主线；Sheet 与 Base 含 sheetBlocks。
+   * 缺省仍返回完整 blocks；`blocks: 'omit'` 只返回 snapshot 与 block 清单，块数据可再按页拉取。
+   */
   public getMergePreviewUnit(
     worktreeId: string,
-    unitId: string
+    unitId: string,
+    options: MergePreviewUnitBlocksOptions = {}
   ): Promise<MergePreviewUnitResponse> {
     return this.getJson<MergePreviewUnitResponse>(
-      `${this.base}/worktrees/${worktreeId}/preview/units/${encodeURIComponent(unitId)}`
+      `${this.base}/worktrees/${worktreeId}/preview/units/${encodeURIComponent(unitId)}${mergePreviewBlocksSuffix(options)}`
+    )
+  }
+
+  /** 已经物化的合并预览的 Sheet blocks 分页；与 `getMergePreviewUnit` 共用一次物化。 */
+  public getMergePreviewUnitBlocks(
+    worktreeId: string,
+    unitId: string,
+    options: MergePreviewUnitBlocksOptions = {}
+  ): Promise<MergePreviewUnitBlocksResponse> {
+    return this.getJson<MergePreviewUnitBlocksResponse>(
+      `${this.base}/worktrees/${worktreeId}/preview/units/${encodeURIComponent(unitId)}/blocks${mergePreviewBlocksSuffix(options)}`
     )
   }
 

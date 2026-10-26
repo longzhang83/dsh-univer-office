@@ -97,6 +97,15 @@ export interface UniverfileUnitSummary {
  */
 export const UNIVERFILE_UNIT_METADATA_KEY = '@univer/univerfile-sqlite/unit-metadata'
 
+/** One derived materialization checkpoint written by the Gateway, not by the SDK. */
+export interface UniverfileSnapshotCheckpointInput {
+  /** Materialized snapshot; its `rev` becomes the checkpoint revision. */
+  readonly snapshot: ISnapshot
+  readonly sheetBlocks?: readonly ISheetBlock[]
+  /** Checkpoint rows kept per Unit, newest first, in addition to the revision-1 baseline. */
+  readonly retainedCheckpoints: number
+}
+
 export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
   private readonly _connection: UniverfileSQLiteConnection
   private readonly _database: Database.Database
@@ -563,6 +572,54 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
     })
   }
 
+  /**
+   * Persist a materialization checkpoint so the next load of this Unit replays fewer changesets.
+   *
+   * Checkpoints are derived acceleration stored in the SDK-owned snapshot table: they add no
+   * revision and no History segment, so `history@2` semantics — one row per segment start keyed by
+   * `(unit_id, start_revision)`, with `endRevision` derived from the next start — are untouched,
+   * and upgrade, backup and optimize keep reading the same rows. Older checkpoints are pruned
+   * because every snapshot stays rebuildable from the revision-1 baseline.
+   *
+   * Returns `false` instead of throwing when the Unit is gone, soft-deleted, or already ahead of
+   * `snapshot`: a checkpoint is best-effort and must never fail the read that produced it.
+   */
+  public saveCheckpoint(input: UniverfileSnapshotCheckpointInput): boolean {
+    this._assertOpen()
+    const snapshot = input.snapshot
+    if (!Number.isSafeInteger(snapshot.rev) || snapshot.rev < 1) {
+      return false
+    }
+    const unit = this._getActiveUnitRow(snapshot.unitID)
+    if (unit === null || snapshot.type !== unit.type || snapshot.rev > unit.head_revision) {
+      return false
+    }
+    const snapshotPayload = encode(snapshot)
+    const blocks = (input.sheetBlocks ?? []).map((block) => ({
+      id: block.id,
+      payload: encode(block)
+    }))
+    this._transaction(() => {
+      // Re-read inside the write transaction: the Unit can be soft-deleted between the two reads.
+      if (this._getActiveUnitRow(snapshot.unitID) === null) {
+        return
+      }
+      this._writeSheetBlocks(snapshot.unitID, blocks)
+      this._database
+        .prepare(
+          `INSERT INTO collaboration_snapshots
+             (unit_id, revision, type, payload_json)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(unit_id, revision) DO UPDATE SET
+             type = excluded.type,
+             payload_json = excluded.payload_json`
+        )
+        .run(snapshot.unitID, snapshot.rev, snapshot.type, snapshotPayload)
+      this._pruneCheckpoints(snapshot.unitID, input.retainedCheckpoints)
+    })
+    return true
+  }
+
   async getSheetBlock(
     _context: DatabaseContext,
     unitID: string,
@@ -771,6 +828,36 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
         `SQLite collaboration core schema v${CORE_SCHEMA_VERSION} is missing CLI columns: ${missing.join(', ')}`
       )
     }
+  }
+
+  /**
+   * Keep the newest `retained` snapshots plus the revision-1 baseline.
+   *
+   * Snapshots are derived state, so every surviving row still leaves the Unit replayable; pruning
+   * only bounds how much payload a long edit session accumulates.
+   */
+  private _pruneCheckpoints(unitID: string, retained: number): void {
+    const keep = Number.isSafeInteger(retained) && retained > 0 ? retained : 1
+    const kept = this._database
+      .prepare(
+        `SELECT revision
+         FROM collaboration_snapshots
+         WHERE unit_id = ?
+         ORDER BY revision DESC
+         LIMIT ?`
+      )
+      .all(unitID, keep) as unknown as Array<{ readonly revision: number }>
+    // Read the survivors first: a DELETE whose subquery scans the same table is not portable.
+    if (kept.length === 0) return
+    const holes = kept.map(() => '?').join(', ')
+    this._database
+      .prepare(
+        `DELETE FROM collaboration_snapshots
+         WHERE unit_id = ?
+           AND revision <> 1
+           AND revision NOT IN (${holes})`
+      )
+      .run(unitID, ...kept.map(({ revision }) => revision))
   }
 
   private _writeSheetBlocks(

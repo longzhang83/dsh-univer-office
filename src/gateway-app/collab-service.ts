@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import {
+  type MergePreviewBlockPage,
+  type MergePreviewUnitBlockManifest,
+  type MergePreviewUnitBlocksOptions,
   type PinnedUnitComparisonRef,
   type UnitComparisonRefRequest,
   type UnitComparisonSession,
@@ -41,6 +44,7 @@ import type {
   MergeOutcome,
   MergePreview,
   MergePreviewUnitData,
+  MergePreviewUnitBlocksData,
   MergeSemanticCheck,
   MergeUnitPreview,
   WorktreeCreatedUnit,
@@ -61,6 +65,7 @@ import {
   type UniverfileWorktreeUnitSummary
 } from './univerfile-sqlite/index.js'
 import { unitAdapter } from './univer/unit-types.js'
+import { SnapshotCheckpointer } from './snapshot-checkpoint.js'
 import { KeyedLock } from './util/lock.js'
 import { GatewayExchangeService } from './exchange/gateway-exchange-service.js'
 
@@ -73,6 +78,41 @@ export interface CollabServiceOptions {
 const INITIAL_REVISION = 1
 const MAX_PINNED_COMPARISONS = 64
 const MAX_PREPARED_COMPARISON_CONTEXTS = 128
+/** Materialized merge previews kept per file so block pages do not replay the same Unit. */
+const MAX_MATERIALIZED_MERGE_PREVIEWS = 32
+/** Upper bound on the Sheet blocks one merge preview response may carry. */
+const MAX_MERGE_PREVIEW_BLOCK_PAGE = 512
+
+/**
+ * One merge preview Unit after materialization.
+ *
+ * Blocks stay in their canonical protocol form so a paged response only pays deserialization for
+ * the blocks it actually sends.
+ */
+interface MaterializedMergePreviewUnit {
+  readonly type: UniverType
+  readonly snapshot: ISnapshot
+  readonly blocks: readonly ISheetBlock[]
+}
+
+/**
+ * Outcome of one merge preview Unit materialization. `ok: false` carries the evaluation states
+ * the HTTP layer already reports as data instead of an error response.
+ */
+type PreviewUnitMaterialization =
+  | { readonly ok: true; readonly materialized: MaterializedMergePreviewUnit }
+  | { readonly ok: false; readonly type: number; readonly error: string }
+
+/** A merge preview Unit that cannot be materialized, reported as data with its Unit type. */
+class MergePreviewUnitUnavailableError extends Error {
+  public constructor(
+    public readonly type: number,
+    message: string
+  ) {
+    super(message)
+    this.name = 'MergePreviewUnitUnavailableError'
+  }
+}
 
 interface PinnedComparisonUnit {
   readonly unitId: string
@@ -134,12 +174,15 @@ export class CollabService {
     string,
     Promise<PreparedGatewayUnitComparison>
   >()
+  private readonly _materializedPreviews = new Map<string, Promise<MaterializedMergePreviewUnit>>()
+  private readonly _checkpoints: SnapshotCheckpointer
 
   public constructor(options: CollabServiceOptions = {}) {
     this.runtime = new GatewayFileRuntime(options)
     this.storage = new TrunkStorageCompatibility(this.runtime)
     this.worktrees = new WorktreeCatalogCompatibility(this.runtime)
     this.exchange = new GatewayExchangeService(this)
+    this._checkpoints = new SnapshotCheckpointer(this.runtime.trunkAdapter)
   }
 
   public async createUnit(type: number, input: CreateUnitInput = {}): Promise<CreateUnitResult> {
@@ -176,7 +219,14 @@ export class CollabService {
     const loadData = await this._getTrunkLoadDataWithBlocks(unitId, type, 0, 'gateway-exchange')
     const materializer = new UnitSnapshotMaterializer()
     try {
-      return await materializer.materializeSnapshot(loadData)
+      const materialized = await materializer.materializeSnapshot(loadData)
+      await this._checkpoints.record({
+        unitId,
+        snapshot: materialized.snapshot,
+        sheetBlocks: materialized.sheetBlocks,
+        replayedChangesets: loadData.changesets.length
+      })
+      return materialized
     } finally {
       await materializer.dispose()
     }
@@ -747,10 +797,79 @@ export class CollabService {
     }
   }
 
+  /**
+   * One Unit's read-only merge preview render data.
+   *
+   * Without `options` this is the legacy full payload: snapshot plus every Sheet block. `blocks:
+   * 'omit'` returns the snapshot with a block manifest instead, and `blockOffset` / `blockLimit`
+   * inline only one page. Either way the Unit is materialized at most once per Trunk head, so
+   * pulling the remaining blocks later replays nothing.
+   */
   public async getMergePreviewUnit(
     worktreeId: string,
-    unitId: string
+    unitId: string,
+    options: MergePreviewUnitBlocksOptions = {}
   ): Promise<MergePreviewUnitData> {
+    const target = this._resolveMergePreviewUnit(worktreeId, unitId)
+    if ('data' in target) {
+      return target.data
+    }
+    const materialization = await this._previewUnitMaterialization(worktreeId, target.unit)
+    if (!materialization.ok) {
+      return { type: materialization.type, error: materialization.error }
+    }
+    const materialized = materialization.materialized
+    const page = pageSheetBlocks(materialized.blocks, options)
+    return {
+      type: materialized.type,
+      snapshot: materialized.snapshot,
+      ...(page.items === undefined ? {} : { sheetBlocks: page.items }),
+      ...(materialized.blocks.length === 0
+        ? {}
+        : {
+            blockManifest: {
+              blockIds: materialized.blocks.map((block) => block.id),
+              page: page.page
+            }
+          })
+    }
+  }
+
+  /** One page of Sheet blocks for an already materialized merge preview Unit. */
+  public async getMergePreviewUnitBlocks(
+    worktreeId: string,
+    unitId: string,
+    options: MergePreviewUnitBlocksOptions = {}
+  ): Promise<MergePreviewUnitBlocksData> {
+    const target = this._resolveMergePreviewUnit(worktreeId, unitId)
+    if ('data' in target) {
+      return {
+        type: target.data.type,
+        ...(target.data.error === undefined ? {} : { error: target.data.error })
+      }
+    }
+    const materialization = await this._previewUnitMaterialization(worktreeId, target.unit)
+    if (!materialization.ok) {
+      return { type: materialization.type, error: materialization.error }
+    }
+    const page = pageSheetBlocks(materialization.materialized.blocks, options)
+    return {
+      type: materialization.materialized.type,
+      ...(page.items === undefined ? {} : { blocks: page.items }),
+      page: page.page
+    }
+  }
+
+  /**
+   * Merge preview serves `ready` Worktrees only. Returns the frozen Worktree Unit, or the data
+   * payload for the cases the HTTP layer already reports as data rather than failure.
+   */
+  private _resolveMergePreviewUnit(
+    worktreeId: string,
+    unitId: string
+  ):
+    | { readonly unit: UniverfileWorktreeUnitSummary }
+    | { readonly data: MergePreviewUnitData } {
     const unit = this.worktreeUnits(worktreeId).find((candidate) => candidate.unitId === unitId)
     if (!unit) {
       const deleted = this.runtime.worktreeAdapter
@@ -758,8 +877,7 @@ export class CollabService {
         .find((candidate) => candidate.unitId === unitId)
       if (deleted) {
         return {
-          type: deleted.type,
-          error: `Unit ${unitId} is deleted in Worktree ${worktreeId}`
+          data: { type: deleted.type, error: `Unit ${unitId} is deleted in Worktree ${worktreeId}` }
         }
       }
       throw new Error(`Unit ${unitId} is not part of Worktree ${worktreeId}`)
@@ -767,41 +885,87 @@ export class CollabService {
     const worktree = requireWorktree(this.runtime, worktreeId)
     if (worktree.status !== 'ready') {
       return {
-        type: unit.type,
-        error: `Worktree ${worktreeId} is ${worktree.status}; merge preview requires ready`
+        data: {
+          type: unit.type,
+          error: `Worktree ${worktreeId} is ${worktree.status}; merge preview requires ready`
+        }
       }
     }
+    return { unit }
+  }
+
+  /**
+   * Materialize one preview Unit, or report the evaluation cases that are data rather than failure.
+   *
+   * The result is cached per Trunk head, so `getMergePreviewUnitBlocks` can page the blocks of an
+   * already materialized Unit without evaluating or replaying it again.
+   */
+  private async _previewUnitMaterialization(
+    worktreeId: string,
+    unit: UniverfileWorktreeUnitSummary
+  ): Promise<PreviewUnitMaterialization> {
+    const trunkRevision = this.getCurrentRev(unit.unitId) ?? 0
+    const cacheKey = `${worktreeId}\u0000${unit.unitId}\u0000${trunkRevision}`
+    let pending = this._materializedPreviews.get(cacheKey)
+    if (pending === undefined) {
+      pending = this._evaluateMergePreviewUnit(worktreeId, unit)
+      this._materializedPreviews.set(cacheKey, pending)
+      pending.catch(() => {
+        if (this._materializedPreviews.get(cacheKey) === pending) {
+          this._materializedPreviews.delete(cacheKey)
+        }
+      })
+      while (this._materializedPreviews.size > MAX_MATERIALIZED_MERGE_PREVIEWS) {
+        const oldest = this._materializedPreviews.keys().next().value
+        if (oldest === undefined) break
+        this._materializedPreviews.delete(oldest)
+      }
+    }
+    try {
+      return { ok: true, materialized: await pending }
+    } catch (error) {
+      if (error instanceof MergePreviewUnitUnavailableError) {
+        return { ok: false, type: error.type, error: error.message }
+      }
+      throw error
+    }
+  }
+
+  private async _evaluateMergePreviewUnit(
+    worktreeId: string,
+    unit: UniverfileWorktreeUnitSummary
+  ): Promise<MaterializedMergePreviewUnit> {
     const evaluation = await this.runtime.worktreeService.evaluateWorktreeUnitMerge(
-      { worktreeID: worktreeId, unitID: unitId },
+      { worktreeID: worktreeId, unitID: unit.unitId },
       callOptions('local')
     )
     switch (evaluation.status) {
       case 'preview':
-        return previewUnitData(
-          unit.type,
-          evaluation.preview.snapshot,
-          evaluation.preview.sheetBlocks ?? []
-        )
+        return {
+          type: unit.type,
+          snapshot: evaluation.preview.snapshot,
+          blocks: evaluation.preview.sheetBlocks ?? []
+        }
       case 'not-behind':
         return this._materializeWorktreeHead(worktreeId, unit)
       case 'not-applicable':
         if (evaluation.reason === 'worktree-created-unit') {
           return this._materializeWorktreeHead(worktreeId, unit)
         }
-        return {
-          type: unit.type,
-          error: `Unit ${unitId} is deleted in Worktree ${worktreeId}`
-        }
+        throw new MergePreviewUnitUnavailableError(
+          unit.type,
+          `Unit ${unit.unitId} is deleted in Worktree ${worktreeId}`
+        )
       case 'conflict':
-        return {
-          type: unit.type,
-          error: `Unit ${unitId} conflicts with the latest version`
-        }
+        throw new MergePreviewUnitUnavailableError(
+          unit.type,
+          `Unit ${unit.unitId} conflicts with the latest version`
+        )
       case 'already-merged':
-        return {
-          type: unit.type,
-          error: `Unit ${unitId} is already merged`
-        }
+        throw new MergePreviewUnitUnavailableError(
+          unit.type,
+          `Unit ${unit.unitId} is already merged`
+        )
       default: {
         const unreachable: never = evaluation
         return unreachable
@@ -813,7 +977,7 @@ export class CollabService {
   private async _materializeWorktreeHead(
     worktreeId: string,
     unit: UniverfileWorktreeUnitSummary
-  ): Promise<MergePreviewUnitData> {
+  ): Promise<MaterializedMergePreviewUnit> {
     const loadData = await this._getWorktreeLoadDataWithBlocks(
       worktreeId,
       unit.unitId,
@@ -823,7 +987,11 @@ export class CollabService {
     const materializer = new UnitSnapshotMaterializer()
     try {
       const materialized = await materializer.materializeSnapshot(loadData)
-      return previewUnitData(unit.type, materialized.snapshot, materialized.sheetBlocks)
+      return {
+        type: unit.type,
+        snapshot: materialized.snapshot,
+        blocks: materialized.sheetBlocks
+      }
     } finally {
       await materializer.dispose()
     }
@@ -883,6 +1051,7 @@ export class CollabService {
     this._comparisons.clear()
     this._materializedComparisons.clear()
     this._preparedComparisonContexts.clear()
+    this._materializedPreviews.clear()
     await this.exchange.dispose()
     await this.runtime.dispose()
   }
@@ -1019,6 +1188,14 @@ export class CollabService {
     const materializer = new UnitSnapshotMaterializer()
     try {
       const materialized = await materializer.materializeSnapshot(loadData)
+      if (side.ref.kind === 'trunk') {
+        await this._checkpoints.record({
+          unitId,
+          snapshot: materialized.snapshot,
+          sheetBlocks: materialized.sheetBlocks,
+          replayedChangesets: loadData.changesets.length
+        })
+      }
       const sheetBlocks = deserializeSheetBlocks(materialized.sheetBlocks)
       return {
         present: true,
@@ -1393,19 +1570,6 @@ class WorktreeCatalogCompatibility {
   }
 }
 
-function previewUnitData(
-  type: UniverType,
-  snapshot: ISnapshot,
-  blocks: readonly ISheetBlock[]
-): MergePreviewUnitData {
-  const sheetBlocks = deserializeSheetBlocks(blocks)
-  return {
-    type,
-    snapshot,
-    ...(sheetBlocks === undefined ? {} : { sheetBlocks })
-  }
-}
-
 /**
  * report-only 语义警告,只使用预览摘要已有的元数据,不物化 snapshot、不拖慢预览。
  * 删除 unit 是跨 Unit 引用断裂的直接风险源,但校验引用完整性需要扫描其它 Unit
@@ -1437,6 +1601,34 @@ function previewSemanticChecks(units: MergeUnitPreview[]): MergeSemanticCheck[] 
     })
   }
   return checks
+}
+
+/**
+ * Select the Sheet blocks one response carries.
+ *
+ * `blocks: 'omit'` deserializes nothing; otherwise only the requested page pays the decode, which
+ * is the dominant per-block cost of a large Sheet preview.
+ */
+function pageSheetBlocks(
+  blocks: readonly ISheetBlock[],
+  options: MergePreviewUnitBlocksOptions
+): { readonly items?: IDeserializedSheetBlock[]; readonly page: MergePreviewBlockPage } {
+  const offset = Math.min(Math.max(Math.trunc(options.blockOffset ?? 0), 0), blocks.length)
+  const limit =
+    options.blockLimit === undefined
+      ? blocks.length - offset
+      : Math.min(Math.max(Math.trunc(options.blockLimit), 1), MAX_MERGE_PREVIEW_BLOCK_PAGE)
+  const slice = blocks.slice(offset, offset + limit)
+  const items = options.blocks === 'omit' ? undefined : deserializeSheetBlocks(slice)
+  return {
+    ...(items === undefined ? {} : { items }),
+    page: {
+      offset,
+      count: items?.length ?? 0,
+      total: blocks.length,
+      hasMore: offset + slice.length < blocks.length
+    }
+  }
 }
 
 function deserializeSheetBlocks(

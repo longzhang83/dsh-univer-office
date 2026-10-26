@@ -29,7 +29,7 @@ export function verifyV3Candidate(filename: string): UniverfileVerification {
     if (detectUniverfileSQLiteFormat(filename) !== 'v3') {
       throw new Error('candidate did not identify as v3')
     }
-    connection = new UniverfileSQLiteConnection({ filename })
+    connection = new UniverfileSQLiteConnection({ filename, journalMode: 'default' })
     const integrityRow = connection.database.prepare('PRAGMA integrity_check').get() as
       | Readonly<Record<string, unknown>>
       | undefined

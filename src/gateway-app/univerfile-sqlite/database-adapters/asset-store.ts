@@ -58,9 +58,11 @@ export interface UniverfileSQLiteAssetStoreOptions {
  * distinct scoped identities, while the digest table stores identical bytes once.
  */
 export class UniverfileSQLiteAssetStore {
+  private readonly _connection: UniverfileSQLiteConnection
   private readonly _database: Database.Database
 
   public constructor(options: UniverfileSQLiteAssetStoreOptions) {
+    this._connection = options.connection
     this._database = options.connection.database
     this._initializeSchema()
   }
@@ -122,7 +124,9 @@ export class UniverfileSQLiteAssetStore {
   }
 
   public open(assetId: string): UniverfileOpenedAsset | null {
-    const row = this._database
+    // Blob reads go through the read-only connection so a large asset read never queues behind
+    // the writer lock.
+    const row = this._connection.readDatabase
       .prepare(
         `SELECT a.asset_id, a.unit_id, a.worktree_id, a.digest, a.original_filename,
                 a.media_type, a.byte_size, a.created_at_ms, b.bytes
@@ -151,14 +155,14 @@ export class UniverfileSQLiteAssetStore {
   }
 
   public countBlobs(): number {
-    const row = this._database
+    const row = this._connection.readDatabase
       .prepare('SELECT COUNT(*) AS count FROM collaboration_asset_blobs')
       .get() as { readonly count: number }
     return row.count
   }
 
   public countAssets(): number {
-    const row = this._database
+    const row = this._connection.readDatabase
       .prepare('SELECT COUNT(*) AS count FROM collaboration_assets')
       .get() as { readonly count: number }
     return row.count

@@ -58,6 +58,7 @@ export interface UniverfileSQLiteHistoryDatabaseAdapterOptions {
  * grouping policy; this class only provides its CAS persistence contract and Gateway repair seam.
  */
 export class UniverfileSQLiteHistoryDatabaseAdapter implements IHistoryDatabaseAdapter {
+  private readonly _connection: UniverfileSQLiteConnection
   private readonly _database: Database.Database
   private _disposed = false
 
@@ -65,6 +66,7 @@ export class UniverfileSQLiteHistoryDatabaseAdapter implements IHistoryDatabaseA
     if (!(options?.connection instanceof UniverfileSQLiteConnection)) {
       throw new TypeError('History Database Adapter requires a .univer connection')
     }
+    this._connection = options.connection
     this._database = options.connection.database
     this._initializeSchema()
   }
@@ -74,7 +76,7 @@ export class UniverfileSQLiteHistoryDatabaseAdapter implements IHistoryDatabaseA
     unitID: string
   ): Promise<HistoryRecord | null> {
     this._assertOpen()
-    const row = this._latest(unitID)
+    const row = this._latest(unitID, this._connection.readDatabase)
     return row === undefined ? null : rowToRecord(row)
   }
 
@@ -151,7 +153,7 @@ export class UniverfileSQLiteHistoryDatabaseAdapter implements IHistoryDatabaseA
     }
     parameters.push(options.length + 1)
     // End revisions come from the unfiltered successor, not the next row of this page.
-    const rows = this._database
+    const rows = this._connection.readDatabase
       .prepare(
         `SELECT r.unit_id, r.start_revision, r.user_id, r.created_at_ms, r.origin,
                 r.additional_fields,
@@ -184,7 +186,7 @@ export class UniverfileSQLiteHistoryDatabaseAdapter implements IHistoryDatabaseA
     options: { readonly throughRevision: number }
   ): Promise<readonly HistoryCreatorIndex[]> {
     this._assertOpen()
-    const rows = this._database
+    const rows = this._connection.readDatabase
       .prepare(
         `SELECT DISTINCT user_id, origin
          FROM collaboration_history_records
@@ -207,15 +209,18 @@ export class UniverfileSQLiteHistoryDatabaseAdapter implements IHistoryDatabaseA
   /** Latest persisted boundary, or `null` when History Service has not initialized the Unit. */
   public latestStartRevision(unitID: string): number | null {
     this._assertOpen()
-    return this._latest(unitID)?.start_revision ?? null
+    return this._latest(unitID, this._connection.readDatabase)?.start_revision ?? null
   }
 
   public async dispose(): Promise<void> {
     this._disposed = true
   }
 
-  private _latest(unitID: string): HistoryRow | undefined {
-    return this._database
+  private _latest(
+    unitID: string,
+    database: Database.Database = this._database
+  ): HistoryRow | undefined {
+    return database
       .prepare(
         `SELECT unit_id, start_revision, user_id, created_at_ms, origin, additional_fields
          FROM collaboration_history_records

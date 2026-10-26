@@ -1,4 +1,5 @@
 import { existsSync, unlinkSync } from 'node:fs'
+import type { UniverfileSQLiteJournalMode } from './connection.js'
 import { UniverfileSQLiteConnection } from './connection.js'
 import { UniverfileSQLiteAssetStore } from './database-adapters/asset-store.js'
 import { UniverfileSQLiteDatabaseAdapter } from './database-adapters/collaboration-database-adapter.js'
@@ -13,6 +14,10 @@ import {
 
 export interface OpenUniverfileSQLiteOptions extends UpgradeUniverfileSQLiteOptions {
   readonly busyTimeoutMs?: number
+  /** Journal mode for the runtime connection; defaults to `wal` (see connection.ts). */
+  readonly journalMode?: UniverfileSQLiteJournalMode
+  /** Whether newly written changeset/snapshot payloads are gzip-compressed; defaults to true. */
+  readonly payloadCompression?: boolean
 }
 
 export interface UniverfileSQLite {
@@ -34,18 +39,21 @@ export function openUniverfileSQLite(
     throw new UniverfileSQLiteError('FILE_NOT_FOUND', `.univer file not found: ${filename}`)
   }
   const upgrade = upgradeUniverfileSQLite(filename, options)
-  return openCurrent(filename, upgrade, options.busyTimeoutMs)
+  return openCurrent(filename, upgrade, options)
 }
 
 export function createUniverfileSQLite(
   filename: string,
-  options: Pick<OpenUniverfileSQLiteOptions, 'busyTimeoutMs'> = {}
+  options: Pick<
+    OpenUniverfileSQLiteOptions,
+    'busyTimeoutMs' | 'journalMode' | 'payloadCompression'
+  > = {}
 ): UniverfileSQLite {
   if (filename !== ':memory:' && existsSync(filename)) {
     throw new UniverfileSQLiteError('FILE_EXISTS', `.univer file already exists: ${filename}`)
   }
   try {
-    return openCurrent(filename, { status: 'unchanged', format: 'v3' }, options.busyTimeoutMs)
+    return openCurrent(filename, { status: 'unchanged', format: 'v3' }, options)
   } catch (error) {
     if (filename !== ':memory:' && existsSync(filename)) unlinkSync(filename)
     throw error
@@ -55,11 +63,15 @@ export function createUniverfileSQLite(
 function openCurrent(
   filename: string,
   upgrade: UniverfileUpgradeResult,
-  busyTimeoutMs: number | undefined
+  options: Pick<OpenUniverfileSQLiteOptions, 'busyTimeoutMs' | 'journalMode' | 'payloadCompression'>
 ): UniverfileSQLite {
   const connection = new UniverfileSQLiteConnection({
     filename,
-    ...(busyTimeoutMs === undefined ? {} : { busyTimeoutMs })
+    ...(options.busyTimeoutMs === undefined ? {} : { busyTimeoutMs: options.busyTimeoutMs }),
+    ...(options.journalMode === undefined ? {} : { journalMode: options.journalMode }),
+    ...(options.payloadCompression === undefined
+      ? {}
+      : { payloadCompression: options.payloadCompression })
   })
   let databaseAdapter: UniverfileSQLiteDatabaseAdapter | undefined
   let worktreeDatabaseAdapter: UniverfileSQLiteWorktreeDatabaseAdapter | undefined

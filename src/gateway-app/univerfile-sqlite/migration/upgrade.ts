@@ -324,7 +324,12 @@ function migrateCandidate(
   candidatePath: string,
   sourceFormat: UniverfileUpgradeSourceFormat
 ): number {
-  const connection = new UniverfileSQLiteConnection({ filename: candidatePath })
+  // The candidate is renamed over the original after this connection closes, so it must stay in
+  // its default journal mode without WAL sidecar files.
+  const connection = new UniverfileSQLiteConnection({
+    filename: candidatePath,
+    journalMode: 'default'
+  })
   try {
     let normalizedMergingWorktrees = 0
     if (sourceFormat === 'v0') {

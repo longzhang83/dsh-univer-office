@@ -17,8 +17,12 @@ import {
 } from '@univerjs-pro/collaboration-service'
 import type { IChangeset, ISheetBlock, ISnapshot, UniverType } from '@univerjs/protocol'
 import { UniverfileSQLiteConnection, runUniverfileSQLiteTransaction } from '../connection.ts'
+import {
+  decodeStoredPayload,
+  encodePayloadJson,
+  encodeStoredPayload
+} from '../payload-codec.ts'
 
-const BINARY_TAG = '__univerCollaborationBinary'
 const CORE_SCHEMA_COMPONENT = 'core'
 const CORE_SCHEMA_VERSION = 2
 const CORE_TABLE_NAMES = [
@@ -135,7 +139,7 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
 
   async getUnit(_context: DatabaseContext, unitID: string): Promise<UnitRecord | null> {
     this._assertOpen()
-    const row = this._database
+    const row = this._readDatabase
       .prepare(
         `SELECT unit_id, type, name, head_revision, creator_id, created_at_ms, soft_deleted_at_ms
          FROM collaboration_units
@@ -147,7 +151,7 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
 
   public listUnits(): readonly UniverfileUnitSummary[] {
     this._assertOpen()
-    const rows = this._database
+    const rows = this._readDatabase
       .prepare(
         `SELECT unit_id, type, name, head_revision, creator_id, created_at_ms, soft_deleted_at_ms
          FROM collaboration_units
@@ -161,7 +165,7 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
   /** Active Unit records in catalog order, for synchronous Gateway compatibility entries. */
   public listUnitRecords(): readonly UnitRecord[] {
     this._assertOpen()
-    const rows = this._database
+    const rows = this._readDatabase
       .prepare(
         `SELECT unit_id, type, name, head_revision, creator_id, created_at_ms, soft_deleted_at_ms
          FROM collaboration_units
@@ -174,26 +178,26 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
 
   public getChangeset(unitID: string, revision: number): IChangeset | undefined {
     this._assertOpen()
-    const row = this._database
+    const row = this._readDatabase
       .prepare(
         `SELECT payload_json
          FROM collaboration_changesets
          WHERE unit_id = ? AND revision = ?`
       )
       .get(unitID, revision) as PayloadRow | undefined
-    return row ? decode<IChangeset>(row.payload_json) : undefined
+    return row ? decodeStoredPayload<IChangeset>(row.payload_json) : undefined
   }
 
   public getChangesetBySid(unitID: string, sid: string, reqId: number): IChangeset | undefined {
     this._assertOpen()
-    const row = this._database
+    const row = this._readDatabase
       .prepare(
         `SELECT payload_json
          FROM collaboration_changesets
          WHERE unit_id = ? AND sid = ? AND req_id = ?`
       )
       .get(unitID, sid, reqId) as PayloadRow | undefined
-    return row ? decode<IChangeset>(row.payload_json) : undefined
+    return row ? decodeStoredPayload<IChangeset>(row.payload_json) : undefined
   }
 
   async getSnapshot(
@@ -207,7 +211,7 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
       throw invalidRequest('Snapshot revision cannot be negative')
     }
 
-    const unit = this._getActiveUnitRow(unitID)
+    const unit = this._getActiveUnitRow(unitID, this._readDatabase)
     if (!unit) {
       return null
     }
@@ -215,7 +219,7 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
       requestedRevision === undefined || requestedRevision === 0
         ? unit.head_revision
         : Math.min(requestedRevision, unit.head_revision)
-    const row = this._database
+    const row = this._readDatabase
       .prepare(
         `SELECT collaboration_snapshots.payload_json
          FROM collaboration_snapshots
@@ -228,7 +232,7 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
          LIMIT 1`
       )
       .get(unitID, targetRevision) as PayloadRow | undefined
-    return row ? decode<ISnapshot>(row.payload_json) : null
+    return row ? decodeStoredPayload<ISnapshot>(row.payload_json) : null
   }
 
   async getChangesets(
@@ -242,11 +246,11 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
       throw invalidRequest('Changeset range revisions cannot be negative')
     }
 
-    const unit = this._getActiveUnitRow(unitID)
+    const unit = this._getActiveUnitRow(unitID, this._readDatabase)
     if (!unit) {
       return null
     }
-    const rows = this._database
+    const rows = this._readDatabase
       .prepare(
         `SELECT payload_json
          FROM collaboration_changesets
@@ -264,7 +268,7 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
         to,
         unit.head_revision
       ) as unknown as PayloadRow[]
-    return rows.map((row) => decode<IChangeset>(row.payload_json))
+    return rows.map((row) => decodeStoredPayload<IChangeset>(row.payload_json))
   }
 
   async getSnapshotInfo(
@@ -278,7 +282,7 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
       throw invalidRequest('Snapshot revision cannot be negative')
     }
 
-    const unit = this._getActiveUnitRow(unitID)
+    const unit = this._getActiveUnitRow(unitID, this._readDatabase)
     if (!unit) {
       return null
     }
@@ -286,7 +290,7 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
       requestedRevision === undefined || requestedRevision === 0
         ? unit.head_revision
         : Math.min(requestedRevision, unit.head_revision)
-    const row = this._database
+    const row = this._readDatabase
       .prepare(
         `SELECT collaboration_snapshots.revision
          FROM collaboration_snapshots
@@ -312,7 +316,7 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
     reqId: number
   ): Promise<IChangeset | null> {
     this._assertOpen()
-    const row = this._database
+    const row = this._readDatabase
       .prepare(
         `SELECT collaboration_changesets.payload_json
          FROM collaboration_changesets
@@ -324,7 +328,7 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
            AND collaboration_units.soft_deleted_at_ms IS NULL`
       )
       .get(unitID, sid, reqId) as PayloadRow | undefined
-    return row ? decode<IChangeset>(row.payload_json) : null
+    return row ? decodeStoredPayload<IChangeset>(row.payload_json) : null
   }
 
   async createUnit(
@@ -334,10 +338,10 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
     this._assertOpen()
     validateInitialUnit(input)
 
-    const snapshotPayload = encode(input.snapshot)
+    const snapshotPayload = this._encodeStored(input.snapshot)
     const blocks = (input.sheetBlocks ?? []).map((block) => ({
       id: block.id,
-      payload: encode(block)
+      payload: encodePayloadJson(block)
     }))
     return this._transaction(() => {
       if (this._hasTombstone(input.record.unitID)) {
@@ -478,7 +482,8 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
       ...input.changeset,
       createTime: Math.floor(createdAt / 1000)
     }
-    const payload = encode(changeset)
+    // Encoded outside the write transaction so compression CPU never lengthens the write lock.
+    const payload = this._encodeStored(changeset)
 
     return this._transaction(() => {
       const unit = this._getActiveUnitRow(changeset.unitID)
@@ -532,7 +537,7 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
 
       return {
         status: 'committed',
-        changeset: decode<IChangeset>(payload),
+        changeset: decodeStoredPayload<IChangeset>(payload),
         headRevision: changeset.revision
       }
     })
@@ -540,10 +545,10 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
 
   async saveSnapshot(_context: DatabaseContext, input: SaveSnapshotInput): Promise<void> {
     this._assertOpen()
-    const snapshotPayload = encode(input.snapshot)
+    const snapshotPayload = this._encodeStored(input.snapshot)
     const blocks = (input.sheetBlocks ?? []).map((block) => ({
       id: block.id,
-      payload: encode(block)
+      payload: encodePayloadJson(block)
     }))
     this._transaction(() => {
       const unit = this._getActiveUnitRow(input.snapshot.unitID)
@@ -594,10 +599,10 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
     if (unit === null || snapshot.type !== unit.type || snapshot.rev > unit.head_revision) {
       return false
     }
-    const snapshotPayload = encode(snapshot)
+    const snapshotPayload = this._encodeStored(snapshot)
     const blocks = (input.sheetBlocks ?? []).map((block) => ({
       id: block.id,
-      payload: encode(block)
+      payload: encodePayloadJson(block)
     }))
     this._transaction(() => {
       // Re-read inside the write transaction: the Unit can be soft-deleted between the two reads.
@@ -626,7 +631,7 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
     blockID: string
   ): Promise<ISheetBlock | null> {
     this._assertOpen()
-    const row = this._database
+    const row = this._readDatabase
       .prepare(
         `SELECT collaboration_sheet_blocks.payload_json
          FROM collaboration_sheet_blocks
@@ -637,7 +642,7 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
            AND collaboration_units.soft_deleted_at_ms IS NULL`
       )
       .get(unitID, blockID) as PayloadRow | undefined
-    return row ? decode<ISheetBlock>(row.payload_json) : null
+    return row ? decodeStoredPayload<ISheetBlock>(row.payload_json) : null
   }
 
   async dispose(): Promise<void> {
@@ -745,8 +750,11 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
     })
   }
 
-  private _getActiveUnitRow(unitID: string): UnitRow | null {
-    const row = this._database
+  private _getActiveUnitRow(
+    unitID: string,
+    database: Database.Database = this._database
+  ): UnitRow | null {
+    const row = database
       .prepare(
         `SELECT unit_id, type, name, head_revision, creator_id, created_at_ms, soft_deleted_at_ms
          FROM collaboration_units
@@ -878,6 +886,19 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
 
   private _transaction<T>(operation: () => T): T {
     return runUniverfileSQLiteTransaction(this._database, operation)
+  }
+
+  /**
+   * Read-only connection owned by the shared `.univer` connection. Pure reads use it so a write
+   * transaction on the writable connection cannot delay them; reads inside a write transaction
+   * must stay on `this._database`.
+   */
+  private get _readDatabase(): Database.Database {
+    return this._connection.readDatabase
+  }
+
+  private _encodeStored(value: unknown): string {
+    return encodeStoredPayload(value, { compress: this._connection.payloadCompressionEnabled })
   }
 
   private _assertOpen(): void {
@@ -1019,33 +1040,4 @@ function incompatibleSchema(message: string): CollabError {
 
 function uniqueUnitIDs(unitIDs: readonly string[]): readonly string[] {
   return [...new Set(unitIDs)]
-}
-
-function encode(value: unknown): string {
-  return JSON.stringify(value, (_key, current: unknown) => {
-    if (current instanceof Uint8Array) {
-      return {
-        [BINARY_TAG]: Buffer.from(current).toString('base64')
-      }
-    }
-    return current
-  })
-}
-
-function decode<T>(payload: string): T {
-  return JSON.parse(payload, (_key, current: unknown) => {
-    if (isBinaryEncoding(current)) {
-      return Uint8Array.from(Buffer.from(current[BINARY_TAG], 'base64'))
-    }
-    return current
-  }) as T
-}
-
-function isBinaryEncoding(value: unknown): value is Record<typeof BINARY_TAG, string> {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    Object.keys(value).length === 1 &&
-    typeof (value as Record<string, unknown>)[BINARY_TAG] === 'string'
-  )
 }

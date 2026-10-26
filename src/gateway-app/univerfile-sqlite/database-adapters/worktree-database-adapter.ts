@@ -27,6 +27,11 @@ import type {
 } from '@univerjs-pro/collaboration-worktree-service'
 import { UniverType, type IChangeset } from '@univerjs/protocol'
 import { UniverfileSQLiteConnection, runUniverfileSQLiteTransaction } from '../connection.ts'
+import {
+  decodeStoredPayload,
+  encodePayloadJson,
+  encodeStoredPayload
+} from '../payload-codec.ts'
 const SCHEMA_COMPONENT = 'worktree'
 const SCHEMA_VERSION = 3
 const TABLE_NAMES = [
@@ -37,7 +42,6 @@ const TABLE_NAMES = [
   'collaboration_worktree_unit_merge_artifacts',
   'collaboration_worktree_deleted_units'
 ] as const
-const BINARY_TAG = '__univerCollaborationBinary'
 
 const SUPPORTED_UNIT_TYPES = new Set<UniverType>([
   UniverType.UNIVER_SHEET,
@@ -189,13 +193,14 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
     worktreeID: string
   ): Promise<WorktreeAggregateRecord | null> {
     this._assertOpen()
-    return this._getAggregate(worktreeID)
+    return this._getAggregate(worktreeID, this._readDatabase)
   }
 
   public listWorktrees(status?: string): readonly UniverfileWorktreeSummary[] {
     this._assertOpen()
+    const read = this._readDatabase
     const rows = (status === undefined
-      ? this._database
+      ? read
           .prepare(
             `SELECT worktree_id, sid, status, agent_id, name,
                       created_at_ms, merged_at_ms
@@ -203,7 +208,7 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
                ORDER BY created_at_ms ASC, worktree_id ASC`
           )
           .all()
-      : this._database
+      : read
           .prepare(
             `SELECT worktree_id, sid, status, agent_id, name,
                       created_at_ms, merged_at_ms
@@ -212,12 +217,12 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
                ORDER BY created_at_ms ASC, worktree_id ASC`
           )
           .all(status)) as unknown as WorktreeRow[]
-    return rows.map((row) => this._rowToGatewaySummary(row))
+    return rows.map((row) => this._rowToGatewaySummary(row, read))
   }
 
   public listWorktreeUnits(worktreeID: string): readonly UniverfileWorktreeUnitSummary[] {
     this._assertOpen()
-    return this._getUnitRows(worktreeID).map((row) => ({
+    return this._getUnitRows(worktreeID, this._readDatabase).map((row) => ({
       unitId: row.unit_id,
       type: row.type as UniverType,
       name: row.name,
@@ -227,7 +232,7 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
 
   public listDeletedUnits(worktreeID: string): readonly UniverfileDeletedWorktreeUnit[] {
     this._assertOpen()
-    return this._getDeletedUnitRows(worktreeID).map((row) => ({
+    return this._getDeletedUnitRows(worktreeID, this._readDatabase).map((row) => ({
       unitId: row.unit_id,
       type: row.type as UniverType,
       name: row.name,
@@ -241,7 +246,7 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
     unitID: string
   ): Promise<WorktreeUnitRecord | null> {
     this._assertOpen()
-    const row = this._getUnitRow(worktreeID, unitID)
+    const row = this._getUnitRow(worktreeID, unitID, this._readDatabase)
     return row ? rowToUnitRecord(row) : null
   }
 
@@ -253,13 +258,13 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
   ): Promise<readonly IChangeset[] | null> {
     this._assertOpen()
     validateRange(range)
-    const unit = this._getUnitRow(worktreeID, unitID)
+    const unit = this._getUnitRow(worktreeID, unitID, this._readDatabase)
     if (!unit) return null
     const to =
       range.to === undefined || range.to === 0
         ? unit.draft_head_revision
         : Math.min(range.to, unit.draft_head_revision)
-    const rows = this._database
+    const rows = this._readDatabase
       .prepare(
         `SELECT payload_json
          FROM collaboration_worktree_changesets
@@ -268,7 +273,7 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
          ORDER BY revision ASC`
       )
       .all(worktreeID, unitID, range.from, to) as unknown as PayloadRow[]
-    return rows.map(({ payload_json }) => decode<IChangeset>(payload_json))
+    return rows.map(({ payload_json }) => decodeStoredPayload<IChangeset>(payload_json))
   }
 
   async getDraftSubmission(
@@ -279,14 +284,14 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
     reqId: number
   ): Promise<IChangeset | null> {
     this._assertOpen()
-    const row = this._database
+    const row = this._readDatabase
       .prepare(
         `SELECT payload_json
          FROM collaboration_worktree_changesets
          WHERE worktree_id = ? AND unit_id = ? AND sid = ? AND req_id = ?`
       )
       .get(worktreeID, unitID, sid, reqId) as PayloadRow | undefined
-    return row ? decode<IChangeset>(row.payload_json) : null
+    return row ? decodeStoredPayload<IChangeset>(row.payload_json) : null
   }
 
   async getUnitSeed(
@@ -295,7 +300,7 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
     unitID: string
   ): Promise<WorktreeUnitSeed | null> {
     this._assertOpen()
-    return this._getUnitSeed(worktreeID, unitID)
+    return this._getUnitSeed(worktreeID, unitID, this._readDatabase)
   }
 
   async getUnitMergeArtifact(
@@ -304,7 +309,7 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
     unitID: string
   ): Promise<WorktreeUnitMergeArtifact | null> {
     this._assertOpen()
-    return this._getUnitMergeArtifact(worktreeID, unitID)
+    return this._getUnitMergeArtifact(worktreeID, unitID, this._readDatabase)
   }
 
   async createWorktree(
@@ -444,7 +449,7 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
           existing.source === 'worktree' &&
           existing.type === unit.type &&
           existingSeed !== null &&
-          encode(existingSeed) === encode(seed)
+          encodePayloadJson(existingSeed) === encodePayloadJson(seed)
         return {
           status: exactRetry ? 'already-created' : 'unit-exists',
           aggregate: this._requireAggregate(unit.worktreeID)
@@ -490,8 +495,8 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
         .run(
           unit.worktreeID,
           unit.unitID,
-          encode(seed.snapshot),
-          seed.sheetBlocks === undefined ? null : encode(seed.sheetBlocks)
+          this._encodeStored(seed.snapshot),
+          seed.sheetBlocks === undefined ? null : encodePayloadJson(seed.sheetBlocks)
         )
       return {
         status: 'created',
@@ -534,14 +539,14 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
           input.worktreeID,
           input.unitID,
           input.artifact.readyDraftHeadRevision,
-          encode(input.artifact.unit.snapshot),
+          this._encodeStored(input.artifact.unit.snapshot),
           input.artifact.unit.sheetBlocks === undefined
             ? null
-            : encode(input.artifact.unit.sheetBlocks)
+            : encodePayloadJson(input.artifact.unit.sheetBlocks)
         )
       return {
         status: 'saved',
-        artifact: decode<WorktreeUnitMergeArtifact>(encode(input.artifact))
+        artifact: decodeStoredPayload<WorktreeUnitMergeArtifact>(encodePayloadJson(input.artifact))
       }
     })
   }
@@ -585,6 +590,8 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
         }
       }
       validateChangesetCandidate(record, changeset)
+      // Encoded outside the write transaction so compression CPU never lengthens the write lock.
+      const payload = this._encodeStored(changeset)
       this._database
         .prepare(
           `INSERT INTO collaboration_worktree_changesets
@@ -599,7 +606,7 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
           changeset.baseRev,
           changeset.sid as string,
           changeset.reqId as number,
-          encode(changeset),
+          payload,
           createdAt
         )
       const update = this._database
@@ -624,7 +631,7 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
       }
       return {
         status: 'committed',
-        changeset: decode<IChangeset>(encode(changeset)),
+        changeset: decodeStoredPayload<IChangeset>(payload),
         headRevision: changeset.revision
       }
     })
@@ -859,7 +866,7 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
            SET merge_result_json = ?
            WHERE worktree_id = ? AND unit_id = ?`
         )
-        .run(encode(input.mergeResult), input.worktreeID, input.unitID)
+        .run(encodePayloadJson(input.mergeResult), input.worktreeID, input.unitID)
       return {
         status: 'recorded',
         aggregate: this._requireAggregate(input.worktreeID)
@@ -1061,8 +1068,11 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
     )
   }
 
-  private _getWorktreeRow(worktreeID: string): WorktreeRow | null {
-    const row = this._database
+  private _getWorktreeRow(
+    worktreeID: string,
+    database: Database.Database = this._database
+  ): WorktreeRow | null {
+    const row = database
       .prepare(
         `SELECT worktree_id, sid, status, agent_id, name,
                 created_at_ms, merged_at_ms
@@ -1073,8 +1083,12 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
     return row ?? null
   }
 
-  private _getUnitRow(worktreeID: string, unitID: string): WorktreeUnitRow | null {
-    const row = this._database
+  private _getUnitRow(
+    worktreeID: string,
+    unitID: string,
+    database: Database.Database = this._database
+  ): WorktreeUnitRow | null {
+    const row = database
       .prepare(
         `SELECT worktree_id, unit_id, type, name, creator_id, created_at_ms, source,
                 baseline_trunk_revision, draft_head_revision, ready_draft_head_revision,
@@ -1086,8 +1100,11 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
     return row ?? null
   }
 
-  private _getUnitRows(worktreeID: string): readonly WorktreeUnitRow[] {
-    return this._database
+  private _getUnitRows(
+    worktreeID: string,
+    database: Database.Database = this._database
+  ): readonly WorktreeUnitRow[] {
+    return database
       .prepare(
         `SELECT worktree_id, unit_id, type, name, creator_id, created_at_ms, source,
                 baseline_trunk_revision, draft_head_revision, ready_draft_head_revision,
@@ -1111,8 +1128,11 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
     return row ?? null
   }
 
-  private _getDeletedUnitRows(worktreeID: string): readonly DeletedUnitRow[] {
-    return this._database
+  private _getDeletedUnitRows(
+    worktreeID: string,
+    database: Database.Database = this._database
+  ): readonly DeletedUnitRow[] {
+    return database
       .prepare(
         `SELECT worktree_id, unit_id, type, name, source,
                 baseline_trunk_revision, deleted_at_ms
@@ -1123,8 +1143,12 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
       .all(worktreeID) as unknown as DeletedUnitRow[]
   }
 
-  private _getUnitSeed(worktreeID: string, unitID: string): WorktreeUnitSeed | null {
-    const row = this._database
+  private _getUnitSeed(
+    worktreeID: string,
+    unitID: string,
+    database: Database.Database = this._database
+  ): WorktreeUnitSeed | null {
+    const row = database
       .prepare(
         `SELECT snapshot_json, sheet_blocks_json
          FROM collaboration_worktree_unit_seeds
@@ -1133,16 +1157,19 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
       .get(worktreeID, unitID) as SeedRow | undefined
     if (!row) return null
     return {
-      snapshot: decode(row.snapshot_json),
-      ...(row.sheet_blocks_json === null ? {} : { sheetBlocks: decode(row.sheet_blocks_json) })
+      snapshot: decodeStoredPayload(row.snapshot_json),
+      ...(row.sheet_blocks_json === null
+        ? {}
+        : { sheetBlocks: decodeStoredPayload(row.sheet_blocks_json) })
     }
   }
 
   private _getUnitMergeArtifact(
     worktreeID: string,
-    unitID: string
+    unitID: string,
+    database: Database.Database = this._database
   ): WorktreeUnitMergeArtifact | null {
-    const row = this._database
+    const row = database
       .prepare(
         `SELECT ready_draft_head_revision, snapshot_json,
                 sheet_blocks_json
@@ -1154,14 +1181,19 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
     return {
       readyDraftHeadRevision: row.ready_draft_head_revision,
       unit: {
-        snapshot: decode(row.snapshot_json),
-        ...(row.sheet_blocks_json === null ? {} : { sheetBlocks: decode(row.sheet_blocks_json) })
+        snapshot: decodeStoredPayload(row.snapshot_json),
+        ...(row.sheet_blocks_json === null
+          ? {}
+          : { sheetBlocks: decodeStoredPayload(row.sheet_blocks_json) })
       }
     }
   }
 
-  private _getAggregate(worktreeID: string): WorktreeAggregateRecord | null {
-    const worktree = this._getWorktreeRow(worktreeID)
+  private _getAggregate(
+    worktreeID: string,
+    database: Database.Database = this._database
+  ): WorktreeAggregateRecord | null {
+    const worktree = this._getWorktreeRow(worktreeID, database)
     if (!worktree) return null
     return {
       worktree: {
@@ -1169,7 +1201,7 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
         sid: worktree.sid,
         status: toWorktreeStatus(worktree.status)
       },
-      units: this._getUnitRows(worktreeID).map(rowToUnitRecord)
+      units: this._getUnitRows(worktreeID, database).map(rowToUnitRecord)
     }
   }
 
@@ -1184,14 +1216,17 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
     return aggregate
   }
 
-  private _rowToGatewaySummary(row: WorktreeRow): UniverfileWorktreeSummary {
+  private _rowToGatewaySummary(
+    row: WorktreeRow,
+    database: Database.Database
+  ): UniverfileWorktreeSummary {
     const baseline: Record<string, number> = {}
-    for (const unit of this._getUnitRows(row.worktree_id)) {
+    for (const unit of this._getUnitRows(row.worktree_id, database)) {
       if (unit.source === 'trunk') {
         baseline[unit.unit_id] = unit.baseline_trunk_revision
       }
     }
-    for (const unit of this._getDeletedUnitRows(row.worktree_id)) {
+    for (const unit of this._getDeletedUnitRows(row.worktree_id, database)) {
       if (unit.source === 'trunk') {
         baseline[unit.unit_id] = unit.baseline_trunk_revision
       }
@@ -1231,6 +1266,19 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
     return runUniverfileSQLiteTransaction(this._database, operation)
   }
 
+  /**
+   * Read-only connection owned by the shared `.univer` connection. Pure reads use it so a write
+   * transaction on the writable connection cannot delay them; reads inside a write transaction
+   * must stay on `this._database`.
+   */
+  private get _readDatabase(): Database.Database {
+    return this._connection.readDatabase
+  }
+
+  private _encodeStored(value: unknown): string {
+    return encodeStoredPayload(value, { compress: this._connection.payloadCompressionEnabled })
+  }
+
   private _assertOpen(): void {
     if (this._disposed) {
       throw new CollabError('INTERNAL_ERROR', 'SQLite Worktree Database Adapter is disposed')
@@ -1255,7 +1303,7 @@ function rowToUnitRecord(row: WorktreeUnitRow): WorktreeUnitRecord {
     ...(row.merge_result_json === null
       ? {}
       : {
-          mergeResult: decode<WorktreeUnitMergeResult>(row.merge_result_json)
+          mergeResult: decodeStoredPayload<WorktreeUnitMergeResult>(row.merge_result_json)
         })
   }
 }
@@ -1497,33 +1545,4 @@ function invalidRequest(message: string): CollabError {
 
 function incompatibleSchema(message: string): CollabError {
   return new CollabError('INTERNAL_ERROR', message)
-}
-
-function encode(value: unknown): string {
-  return JSON.stringify(value, (_key, current: unknown) => {
-    if (current instanceof Uint8Array) {
-      return {
-        [BINARY_TAG]: Buffer.from(current).toString('base64')
-      }
-    }
-    return current
-  })
-}
-
-function decode<T>(payload: string): T {
-  return JSON.parse(payload, (_key, current: unknown) => {
-    if (isBinaryEncoding(current)) {
-      return Uint8Array.from(Buffer.from(current[BINARY_TAG], 'base64'))
-    }
-    return current
-  }) as T
-}
-
-function isBinaryEncoding(value: unknown): value is Record<typeof BINARY_TAG, string> {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    Object.keys(value).length === 1 &&
-    typeof (value as Record<string, unknown>)[BINARY_TAG] === 'string'
-  )
 }

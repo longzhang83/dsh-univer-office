@@ -16,6 +16,7 @@ import { GatewaySemanticError } from '../errors.js'
 import {
   UniverfileSQLiteAssetStore,
   UniverfileSQLiteConnection,
+  decodeStoredPayload,
   runUniverfileSQLiteTransaction,
   upgradeUniverfileSQLite,
   detectUniverfileSQLiteFormat,
@@ -141,7 +142,11 @@ export async function optimizeUniverfilePath(
 ): Promise<OptimizeUniverfileReport> {
   validateInput(input)
   detectUniverfileSQLiteFormat(input.sourcePath)
-  const sourceConnection = new UniverfileSQLiteConnection({ filename: input.sourcePath })
+  // The source must stay byte-for-byte untouched, so journal mode conversion is off.
+  const sourceConnection = new UniverfileSQLiteConnection({
+    filename: input.sourcePath,
+    journalMode: 'default'
+  })
   try {
     return await optimizeUniverfileCopy(sourceConnection, input)
   } finally {
@@ -167,7 +172,11 @@ export async function optimizeUniverfileCopy(
     sourceConnection.database.prepare('VACUUM INTO ?').run(temporaryPath)
     // The snapshot is disposable; the original stays untouched even when migration fails.
     upgradeUniverfileSQLite(temporaryPath)
-    outputConnection = new UniverfileSQLiteConnection({ filename: temporaryPath })
+    // The candidate is renamed over the output path after close, so no WAL sidecar files.
+    outputConnection = new UniverfileSQLiteConnection({
+      filename: temporaryPath,
+      journalMode: 'default'
+    })
     const before = countHistory(outputConnection.database)
     rejectActiveWorktreesForHistoryReset(outputConnection.database, input.history)
 
@@ -694,16 +703,9 @@ function encodeStoredJson(value: unknown): string {
   )
 }
 
+/** Stored rows may be gzip-compressed by newer writers; decoding probes the marker prefix. */
 function decodeStoredJson(payload: string): unknown {
-  return JSON.parse(payload, (_key, current: unknown) =>
-    isBinaryEncoding(current)
-      ? Uint8Array.from(Buffer.from(current[BINARY_TAG], 'base64'))
-      : current
-  ) as unknown
-}
-
-function isBinaryEncoding(value: unknown): value is Record<typeof BINARY_TAG, string> {
-  return isRecord(value) && Object.keys(value).length === 1 && typeof value[BINARY_TAG] === 'string'
+  return decodeStoredPayload<unknown>(payload)
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

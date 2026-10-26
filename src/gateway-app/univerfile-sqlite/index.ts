@@ -5,6 +5,12 @@ export {
 } from './connection.js'
 export type { UniverfileSQLiteConnectionOptions } from './connection.js'
 export { UniverfileSQLiteError } from './errors.js'
+export {
+  COMPRESSED_PAYLOAD_PREFIX,
+  decodeStoredPayload,
+  encodePayloadJson,
+  encodeStoredPayload
+} from './payload-codec.js'
 export { createUniverfileSQLite, openUniverfileSQLite } from './open.js'
 export type { OpenUniverfileSQLiteOptions, UniverfileSQLite } from './open.js'
 export { detectUniverfileSQLiteFormat } from './schema/detect.js'

@@ -15,12 +15,12 @@ export type UniverFileView =
 /**
  * Resolve one `.univer` path to a renderable state.
  *
- * Reuses the shared Turn-preview poll (the same 900 ms cadence the review cards
- * use), so a file opened while an agent is editing it keeps following the
- * Host's authoritative worktree state instead of freezing at open time. The
- * Gateway phase is added on top because `useUniverStates` deliberately swallows
- * non-missing failures: without it a stopped Gateway would be indistinguishable
- * from a slow first load, and the user would get no way to start it.
+ * Reuses the shared Turn-preview state hook (WebSocket invalidation push first, with the same
+ * 900 ms polling fallback the review cards use), so a file opened while an agent is editing it
+ * keeps following the Host's authoritative worktree state instead of freezing at open time. The
+ * Gateway phase is added on top because `useUniverStates` deliberately swallows non-missing
+ * failures: without it a stopped Gateway would be indistinguishable from a slow first load, and
+ * the user would get no way to start it.
  */
 export function useUniverFileView(file: string, sessionId: SessionId): UniverFileView {
   const { states, missingFiles } = useUniverStates([file], sessionId)

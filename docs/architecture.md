@@ -337,6 +337,13 @@ webServer Consumer 使用 DSH `webServer` 的 prefix route 注册 `/univer-api`�
 `/univer-api/worktree-action` 必须绑定当前 DSH 会话及其 workspace scope，不能只凭浏览器提交的
 绝对路径授权。Viewer 内置操作走已通过 DSH 鉴权的 `/uf`，不额外绑定会话范围。
 
+Client 的状态刷新以推送为主：它通过 `/univer-viewer/ws` 隧道订阅相关 `.univer` 文件的
+lifecycle-event 通道（univerfile 通道加每个活跃 worktree 通道），把收到的 `WorktreeLifecycleEvent`
+仅当作轻量失效通知，随后仍走按 `sessionId` 校验的 `/univer-api/state` 拉取权威状态；推送不携带
+完整状态，也不放宽隧道鉴权契约。轮询保留为兜底：任一通道未建立时按原间隔轮询，全部通道就绪时
+暂停轮询并在重连后全量补拉一次。页面隐藏时推送通道保持打开，由通知触发的拉取延迟到页面可见。
+通道断连按指数退避重连；隧道不可用的部署自动退化为纯轮询的既有行为。
+
 ## 9. Tools Consumer
 
 Tools Consumer 注册面向模型的领域工具，而不是一个透传 CLI 的通用工具：

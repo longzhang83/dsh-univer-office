@@ -201,6 +201,10 @@ DSH 会自动选择这些工具，日常使用不需要手动调用。
 | `gatewayRequestTimeoutMs` | `3000` | 状态读取超时 |
 | `gatewayMutationTimeoutMs` | `60000` | 写操作超时 |
 | `unitContentOperationTimeoutMs` | `120000` | 导入、导出、检查和执行超时 |
+| `unitContentWorkerPool` | `true` | 跨操作复用保温的 Unit Content Worker 进程；`false` 退回每次操作一个进程 |
+| `unitContentWorkerPoolSize` | `2` | 存活池化 Worker 上限；超出的并发操作排队 |
+| `unitContentWorkerIdleTimeoutMs` | `60000` | 池化 Worker 空闲该时长后回收 |
+| `unitContentWorkerMaxTasks` | `20` | 池化 Worker 完成该数量操作后强制重建 |
 | `screenshotOperationTimeoutMs` | `120000` | 一次浏览器截图操作的总超时 |
 | `printPdfOperationTimeoutMs` | `120000` | 一次浏览器 PDF 打印操作的总超时 |
 | `screenshotMaxPages` | `30` | 一次 Doc 或 Slide 截图最多渲染的页数 |

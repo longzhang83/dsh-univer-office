@@ -21,6 +21,14 @@ export interface Config {
   gatewayMutationTimeoutMs?: number
   /** Maximum lifetime of a one-shot content worker process. */
   unitContentOperationTimeoutMs?: number
+  /** Reuse warm Unit Content Worker processes across operations instead of one process per operation. */
+  unitContentWorkerPool?: boolean
+  /** Maximum number of live pooled Unit Content Worker processes; extra concurrent work queues. */
+  unitContentWorkerPoolSize?: number
+  /** Kill a pooled Unit Content Worker after this much idle time. */
+  unitContentWorkerIdleTimeoutMs?: number
+  /** Force-rebuild a pooled Unit Content Worker after this many completed operations. */
+  unitContentWorkerMaxTasks?: number
   /** Maximum lifetime of one browser-backed screenshot operation. */
   screenshotOperationTimeoutMs?: number
   /** Maximum lifetime of one browser-backed PDF print operation. */
@@ -75,6 +83,10 @@ export interface ResolvedConfig {
   readonly gatewayRequestTimeoutMs: number
   readonly gatewayMutationTimeoutMs: number
   readonly unitContentOperationTimeoutMs: number
+  readonly unitContentWorkerPool: boolean
+  readonly unitContentWorkerPoolSize: number
+  readonly unitContentWorkerIdleTimeoutMs: number
+  readonly unitContentWorkerMaxTasks: number
   readonly screenshotOperationTimeoutMs: number
   readonly printPdfOperationTimeoutMs: number
   readonly screenshotMaxPages: number
@@ -118,6 +130,10 @@ export const Config: z<Config> = z.object({
   gatewayRequestTimeoutMs: z.natural().default(3_000),
   gatewayMutationTimeoutMs: z.natural().default(60_000),
   unitContentOperationTimeoutMs: z.natural().default(120_000),
+  unitContentWorkerPool: z.boolean().default(true),
+  unitContentWorkerPoolSize: z.natural().default(2),
+  unitContentWorkerIdleTimeoutMs: z.natural().default(60_000),
+  unitContentWorkerMaxTasks: z.natural().default(20),
   screenshotOperationTimeoutMs: z.natural().default(120_000),
   printPdfOperationTimeoutMs: z.natural().default(120_000),
   screenshotMaxPages: z.natural().default(30),
@@ -150,6 +166,10 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     gatewayRequestTimeoutMs: config.gatewayRequestTimeoutMs ?? 3_000,
     gatewayMutationTimeoutMs: config.gatewayMutationTimeoutMs ?? 60_000,
     unitContentOperationTimeoutMs: config.unitContentOperationTimeoutMs ?? 120_000,
+    unitContentWorkerPool: config.unitContentWorkerPool ?? true,
+    unitContentWorkerPoolSize: config.unitContentWorkerPoolSize ?? 2,
+    unitContentWorkerIdleTimeoutMs: config.unitContentWorkerIdleTimeoutMs ?? 60_000,
+    unitContentWorkerMaxTasks: config.unitContentWorkerMaxTasks ?? 20,
     screenshotOperationTimeoutMs: config.screenshotOperationTimeoutMs ?? 120_000,
     printPdfOperationTimeoutMs: config.printPdfOperationTimeoutMs ?? 120_000,
     screenshotMaxPages: config.screenshotMaxPages ?? 30,
@@ -183,6 +203,9 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     gatewayRequestTimeoutMs: resolved.gatewayRequestTimeoutMs,
     gatewayMutationTimeoutMs: resolved.gatewayMutationTimeoutMs,
     unitContentOperationTimeoutMs: resolved.unitContentOperationTimeoutMs,
+    unitContentWorkerPoolSize: resolved.unitContentWorkerPoolSize,
+    unitContentWorkerIdleTimeoutMs: resolved.unitContentWorkerIdleTimeoutMs,
+    unitContentWorkerMaxTasks: resolved.unitContentWorkerMaxTasks,
     screenshotOperationTimeoutMs: resolved.screenshotOperationTimeoutMs,
     printPdfOperationTimeoutMs: resolved.printPdfOperationTimeoutMs,
     screenshotMaxPages: resolved.screenshotMaxPages,

@@ -1,4 +1,5 @@
 import { extname, isAbsolute } from 'node:path'
+import { createInterface } from 'node:readline'
 import { prepareContentExecutionProgram } from '@univer-cli/content-execution'
 import { inspectContent, type ContentInspectionQuery } from '@univer-cli/content-inspection'
 import { createStandardHeadlessUniverFactory } from '@univer-cli/headless-univer'
@@ -92,21 +93,35 @@ interface WorkerEnvelope {
   readonly error?: { readonly code: string; readonly message: string }
 }
 
-const envelope = await main().then<WorkerEnvelope>(
-  (result) => ({ ok: true, result }),
-  (error: unknown) => ({
-    ok: false,
-    error: {
-      code: errorCode(error),
-      message: error instanceof Error ? error.message : String(error)
-    }
-  })
-)
-process.stdout.write(`${JSON.stringify(envelope)}\n`)
-if (!envelope.ok) process.exitCode = 1
+/**
+ * Serve newline-delimited requests until stdin closes. The Host keeps one
+ * process per pool slot and sends one request at a time; closing stdin (the
+ * one-shot path) ends the loop. Each request owns its full task lifecycle —
+ * collaboration runtime created and closed inside `main()` — so no Unit,
+ * worktree, or snapshot state crosses the request boundary. A failed request
+ * answers with an error envelope and keeps serving; only a broken stdin or a
+ * crash ends the process.
+ */
+let lastOk = true
+for await (const line of createInterface({ input: process.stdin, terminal: false })) {
+  const request = line.trim()
+  if (request.length === 0) continue
+  const envelope = await main(request)
+    .then<WorkerEnvelope>((result) => ({ ok: true, result }))
+    .catch<WorkerEnvelope>((error: unknown) => ({
+      ok: false,
+      error: {
+        code: errorCode(error),
+        message: error instanceof Error ? error.message : String(error)
+      }
+    }))
+  lastOk = envelope.ok
+  process.stdout.write(`${JSON.stringify(envelope)}\n`)
+}
+if (!lastOk) process.exitCode = 1
 
-async function main(): Promise<JsonValue> {
-  const request = parseRequest(JSON.parse(await readStdin()) as unknown)
+async function main(line: string): Promise<JsonValue> {
+  const request = parseRequest(JSON.parse(line) as unknown)
   if (request.operation === 'import') {
     return (await importOfficeFile(
       request.sourcePath,
@@ -528,16 +543,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function invalidRequest(message: string): never {
   throw codedError('UNIT_CONTENT_WORKER_REQUEST_INVALID', message)
-}
-
-async function readStdin(): Promise<string> {
-  const chunks: Buffer[] = []
-  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk))
-  const value = Buffer.concat(chunks).toString('utf8')
-  if (value.trim().length === 0) {
-    throw codedError('UNIT_CONTENT_WORKER_REQUEST_INVALID', 'Unit content worker request is empty')
-  }
-  return value
 }
 
 function codedError(code: string, message: string): Error {

@@ -86,7 +86,13 @@ export class GatewayUniverService extends UniverService {
     this.unitContent = new UnitContentOperations(
       config.gatewayRequestTimeoutMs,
       config.unitContentCommitTimeoutMs,
-      config.unitContentOperationTimeoutMs
+      config.unitContentOperationTimeoutMs,
+      {
+        enabled: config.unitContentWorkerPool,
+        size: config.unitContentWorkerPoolSize,
+        idleTimeoutMs: config.unitContentWorkerIdleTimeoutMs,
+        maxTasksPerWorker: config.unitContentWorkerMaxTasks
+      }
     )
     this.worktrees = new WorktreeOperations(
       config.gatewayRequestTimeoutMs,
@@ -656,6 +662,7 @@ export class GatewayUniverService extends UniverService {
     this.stateCache.clear()
     this.unitCache.clear()
     await this.renderCache?.clear()
+    await this.unitContent.dispose()
     await this.gatewaySupervisor.dispose()
   }
 
@@ -816,6 +823,8 @@ export class GatewayUniverService extends UniverService {
   private async requireGateway(): Promise<string> {
     const available = await this.ensureGateway()
     if (!available.ok) throw new UniverError(available.reason, 'GATEWAY_UNAVAILABLE')
+    // Warm the Unit content worker pool once the Gateway it talks to exists.
+    this.unitContent.prewarm()
     return available.gateway
   }
 }

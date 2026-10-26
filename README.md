@@ -201,6 +201,10 @@ The defaults are designed for local use: the service starts at port `9080`. If t
 | `gatewayRequestTimeoutMs` | `3000` | State-read timeout |
 | `gatewayMutationTimeoutMs` | `60000` | Write-operation timeout |
 | `unitContentOperationTimeoutMs` | `120000` | Import, export, inspection, and execution timeout |
+| `unitContentWorkerPool` | `true` | Reuse warm Unit Content Worker processes across operations; `false` restores one process per operation |
+| `unitContentWorkerPoolSize` | `2` | Maximum live pooled workers; extra concurrent operations queue |
+| `unitContentWorkerIdleTimeoutMs` | `60000` | Kill a pooled worker after this much idle time |
+| `unitContentWorkerMaxTasks` | `20` | Force-rebuild a pooled worker after this many operations |
 | `screenshotOperationTimeoutMs` | `120000` | Overall timeout for one browser screenshot operation |
 | `printPdfOperationTimeoutMs` | `120000` | Overall timeout for one browser PDF print operation |
 | `screenshotMaxPages` | `30` | Maximum Doc or Slide pages rendered by one screenshot call |

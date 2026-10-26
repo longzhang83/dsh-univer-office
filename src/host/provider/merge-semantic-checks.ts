@@ -1,4 +1,7 @@
-import type { MergeSemanticCheck } from '../../shared/wire/actions.ts'
+import type {
+  MergeSemanticCheck,
+  MergeSemanticCheckDetails
+} from '../../shared/wire/actions.ts'
 import { GatewayClient } from '../adapters/gateway/client.ts'
 import {
   isRecord,
@@ -7,9 +10,14 @@ import {
   type GatewayUnit
 } from '../adapters/gateway/mapping.ts'
 import { GatewayWorktreeApi } from '../adapters/gateway/worktree-api.ts'
-import type { InspectUnitContentRequest, JsonValue, WorkspacePath } from '../service/types.ts'
+import type { InspectUnitContentRequest, JsonValue } from '../service/types.ts'
 import { UniverError } from '../service/errors.ts'
-import { unitId, worktreeId } from '../service/identifiers.ts'
+import {
+  unitId,
+  worktreeId,
+  type UniverFilePath,
+  type WorkspacePath
+} from '../service/identifiers.ts'
 import { UnitContentOperations } from './unit-content-operations.ts'
 import { RenderOperations } from './render-operations.ts'
 
@@ -17,7 +25,7 @@ import { RenderOperations } from './render-operations.ts'
 interface MergeCheckScope {
   readonly gateway: string
   readonly workspace: WorkspacePath
-  readonly file: string
+  readonly file: UniverFilePath
   readonly worktreeId?: string
 }
 
@@ -159,7 +167,7 @@ export class MergeSemanticChecks {
           summary:
             'Slide layout lint completed, but its report could not be interpreted in this boundary; the raw report is attached.',
           // JsonValue and the wire details type are structurally the same JSON.
-          details: report as MergeSemanticCheck['details']
+          details: report as MergeSemanticCheckDetails
         }
       }
       if (findings === 0) {
@@ -176,7 +184,7 @@ export class MergeSemanticChecks {
         unitId: unit.unitId,
         summary: `Slide layout lint reported ${String(findings)} layout finding(s) in the merged Unit.`,
         // JsonValue and the wire details type are structurally the same JSON.
-        details: report as MergeSemanticCheck['details']
+        details: report as MergeSemanticCheckDetails
       }
     } catch (error) {
       return checkFailure('layout', unit.unitId, 'Slide layout lint failed', error)

@@ -1,5 +1,6 @@
 import { isAbsolute, normalize } from 'node:path'
 import { UnitContentWorker } from '../adapters/unit-content/worker.ts'
+import type { UnitContentWorkerRequest } from '../adapters/unit-content/protocol.ts'
 import type {
   UnitContentInspectionQuery,
   UnitContentWorkerTarget

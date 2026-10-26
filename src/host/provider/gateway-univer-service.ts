@@ -44,9 +44,9 @@ import type {
   UniverOperationResult,
   UniverResourceResult,
   WorktreeActionRequest,
-  WorktreeOperationRequest,
-  WorkspacePath
+  WorktreeOperationRequest
 } from '../service/types.ts'
+import type { UniverFilePath, WorkspacePath } from '../service/identifiers.ts'
 import { UniverError } from '../service/errors.ts'
 import { UniverService } from '../service/univer-service.ts'
 import { assertAuthorizedPath } from '../service/workspace.ts'
@@ -303,7 +303,7 @@ export class GatewayUniverService extends UniverService {
         ...asRecord(result),
         ...(semanticChecks === undefined || semanticChecks.length === 0
           ? {}
-          : { semanticChecks })
+          : { semanticChecks: semanticChecks as unknown as JsonValue })
       }
     }
   }
@@ -440,10 +440,10 @@ export class GatewayUniverService extends UniverService {
       kind: 'screenshot',
       file: request.file,
       unitId: request.unitId,
-      worktreeId: request.worktreeId,
+      ...(request.worktreeId === undefined ? {} : { worktreeId: request.worktreeId }),
       revisions: loaded.revisions,
       assets: loaded.assetFingerprints,
-      target: request.target,
+      ...(request.target === undefined ? {} : { target: request.target }),
       maxPages: this.config.screenshotMaxPages,
       maxPixels: this.config.screenshotMaxPixels
     })
@@ -541,7 +541,7 @@ export class GatewayUniverService extends UniverService {
       kind: 'pdf',
       file: request.file,
       unitId: request.unitId,
-      worktreeId: request.worktreeId,
+      ...(request.worktreeId === undefined ? {} : { worktreeId: request.worktreeId }),
       revisions: loaded.revisions,
       assets: loaded.assetFingerprints
     })
@@ -750,7 +750,7 @@ export class GatewayUniverService extends UniverService {
    */
   private async runMergeChecks(
     gateway: string,
-    request: { readonly workspace: WorkspacePath; readonly file: string },
+    request: { readonly workspace: WorkspacePath; readonly file: UniverFilePath },
     mergedUnits: readonly GatewayUnit[]
   ): Promise<readonly MergeSemanticCheck[]> {
     try {
@@ -803,7 +803,7 @@ export class GatewayUniverService extends UniverService {
     readonly kind: 'screenshot' | 'pdf'
     readonly file: string
     readonly unitId: string
-    readonly worktreeId: string | undefined
+    readonly worktreeId?: string
     readonly revisions: readonly (readonly [string, number])[] | undefined
     readonly assets?: readonly (readonly [string, string | null])[] | undefined
     readonly target?: ScreenshotTarget

@@ -45,8 +45,10 @@ export function decodeStoredPayload<T>(payload: string): T {
  * Encodes a payload for storage, optionally gzip-compressing it behind the marker prefix.
  *
  * Compression happens outside write transactions so the extra CPU never lengthens the SQLite
- * write lock. Callers should only enable it for changeset/snapshot payloads; small or frequently
- * compared values stay plain.
+ * write lock. Callers should enable it for changeset/snapshot/sheet-block payloads: large JSON
+ * written and read whole. Resource plugin payloads and asset blobs stay plain: asset blobs are
+ * raw image bytes (already compressed media, so gzip adds CPU for no size win), and resource
+ * payloads are small and frequently compared values.
  */
 export function encodeStoredPayload(
   value: unknown,

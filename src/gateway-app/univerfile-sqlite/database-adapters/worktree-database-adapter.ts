@@ -496,7 +496,9 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
           unit.worktreeID,
           unit.unitID,
           this._encodeStored(seed.snapshot),
-          seed.sheetBlocks === undefined ? null : encodePayloadJson(seed.sheetBlocks)
+          // Sheet blocks share the changeset/snapshot compression (see the trunk
+          // adapter); readers probe the marker prefix and decompress transparently.
+          seed.sheetBlocks === undefined ? null : this._encodeStored(seed.sheetBlocks)
         )
       return {
         status: 'created',
@@ -540,9 +542,11 @@ export class UniverfileSQLiteWorktreeDatabaseAdapter implements IWorktreeDatabas
           input.unitID,
           input.artifact.readyDraftHeadRevision,
           this._encodeStored(input.artifact.unit.snapshot),
+          // Sheet blocks share the changeset/snapshot compression (see the trunk
+          // adapter); readers probe the marker prefix and decompress transparently.
           input.artifact.unit.sheetBlocks === undefined
             ? null
-            : encodePayloadJson(input.artifact.unit.sheetBlocks)
+            : this._encodeStored(input.artifact.unit.sheetBlocks)
         )
       return {
         status: 'saved',

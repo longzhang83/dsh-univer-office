@@ -19,7 +19,6 @@ import type { IChangeset, ISheetBlock, ISnapshot, UniverType } from '@univerjs/p
 import { UniverfileSQLiteConnection, runUniverfileSQLiteTransaction } from '../connection.ts'
 import {
   decodeStoredPayload,
-  encodePayloadJson,
   encodeStoredPayload
 } from '../payload-codec.ts'
 
@@ -339,9 +338,11 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
     validateInitialUnit(input)
 
     const snapshotPayload = this._encodeStored(input.snapshot)
+    // Sheet blocks share the changeset/snapshot compression: large JSON that is
+    // written whole and read whole, never incrementally compared.
     const blocks = (input.sheetBlocks ?? []).map((block) => ({
       id: block.id,
-      payload: encodePayloadJson(block)
+      payload: this._encodeStored(block)
     }))
     return this._transaction(() => {
       if (this._hasTombstone(input.record.unitID)) {
@@ -546,9 +547,10 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
   async saveSnapshot(_context: DatabaseContext, input: SaveSnapshotInput): Promise<void> {
     this._assertOpen()
     const snapshotPayload = this._encodeStored(input.snapshot)
+    // Sheet blocks share the changeset/snapshot compression (see createUnit).
     const blocks = (input.sheetBlocks ?? []).map((block) => ({
       id: block.id,
-      payload: encodePayloadJson(block)
+      payload: this._encodeStored(block)
     }))
     this._transaction(() => {
       const unit = this._getActiveUnitRow(input.snapshot.unitID)
@@ -600,9 +602,10 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
       return false
     }
     const snapshotPayload = this._encodeStored(snapshot)
+    // Sheet blocks share the changeset/snapshot compression (see createUnit).
     const blocks = (input.sheetBlocks ?? []).map((block) => ({
       id: block.id,
-      payload: encodePayloadJson(block)
+      payload: this._encodeStored(block)
     }))
     this._transaction(() => {
       // Re-read inside the write transaction: the Unit can be soft-deleted between the two reads.

@@ -56,6 +56,10 @@ export interface UniverfileSQLiteAssetStoreOptions {
  * Immutable embedded-asset metadata plus content-addressed bytes inside one `.univer` SQLite file.
  * Snapshot and changeset payloads only carry the opaque `assetId`; repeated uploads may create
  * distinct scoped identities, while the digest table stores identical bytes once.
+ *
+ * Asset bytes are deliberately excluded from the `univer-z1:` payload compression: they are raw
+ * binary (typically already-compressed image media), so gzip adds CPU without a meaningful size
+ * win, and deduplication already happens through the content-addressed digest table.
  */
 export class UniverfileSQLiteAssetStore {
   private readonly _connection: UniverfileSQLiteConnection

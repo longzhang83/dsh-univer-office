@@ -12,6 +12,10 @@ import {
 import type {
   UnitComparisonContext,
   UnitComparisonContextQuery,
+  UnitComparisonDiffSummary,
+  UnitComparisonUnitChangeStatus,
+  UnitComparisonUnitSummaryActivity,
+  UnitComparisonUnitSummaryEntry,
   UnitComparisonSummary
 } from './contract/index.js'
 import { decodeComparisonUnitData } from './comparison-unit-data.js'
@@ -78,6 +82,8 @@ export interface CollabServiceOptions {
 const INITIAL_REVISION = 1
 const MAX_PINNED_COMPARISONS = 64
 const MAX_PREPARED_COMPARISON_CONTEXTS = 128
+/** Wall-clock budget for one whole-comparison `/diff/summary`; exhausted sections degrade to `unavailable`. */
+const COMPARISON_SUMMARY_BUDGET_MS = 2_000
 /** Materialized merge previews kept per file so block pages do not replay the same Unit. */
 const MAX_MATERIALIZED_MERGE_PREVIEWS = 32
 /** Upper bound on the Sheet blocks one merge preview response may carry. */
@@ -174,6 +180,7 @@ export class CollabService {
     string,
     Promise<PreparedGatewayUnitComparison>
   >()
+  private readonly _comparisonSummaries = new Map<string, Promise<UnitComparisonDiffSummary>>()
   private readonly _materializedPreviews = new Map<string, Promise<MaterializedMergePreviewUnit>>()
   private readonly _checkpoints: SnapshotCheckpointer
 
@@ -492,6 +499,146 @@ export class CollabService {
     }
   }
 
+  /**
+   * Cheap layered summary of one pinned comparison, served before any fine-grained `/diff` call.
+   * Statuses come from the pinned heads alone; activity counts reuse the changeset streams the
+   * fine-grained diff also reads while skipping snapshot materialization, decoding, and the
+   * comparison engine. The budget applies between Units; an exhausted budget degrades the
+   * remaining activity sections to `unavailable` instead of slowing the comparison session down.
+   */
+  public async getUnitComparisonSummary(
+    rightWorktreeId: string,
+    comparisonId: string
+  ): Promise<UnitComparisonDiffSummary> {
+    const record = this._comparisons.get(comparisonId)
+    if (record === undefined || record.right.ref.worktreeId !== rightWorktreeId) {
+      throw new Error(`Comparison ${comparisonId} was not found`)
+    }
+    let summaryPromise = this._comparisonSummaries.get(comparisonId)
+    if (summaryPromise === undefined) {
+      summaryPromise = this._buildComparisonSummary(record)
+      this._comparisonSummaries.set(comparisonId, summaryPromise)
+      summaryPromise.catch(() => {
+        if (this._comparisonSummaries.get(comparisonId) === summaryPromise) {
+          this._comparisonSummaries.delete(comparisonId)
+        }
+      })
+      while (this._comparisonSummaries.size > MAX_PREPARED_COMPARISON_CONTEXTS) {
+        const oldest = this._comparisonSummaries.keys().next().value as string | undefined
+        if (oldest === undefined) break
+        this._comparisonSummaries.delete(oldest)
+      }
+    }
+    const summary = await summaryPromise
+    if (this._comparisons.get(comparisonId) !== record) {
+      throw new Error(`Comparison ${comparisonId} has expired`)
+    }
+    // Staleness is a live property; the cached body only carries the pinned-session facts.
+    return { ...summary, stale: this._isComparisonStale(record) }
+  }
+
+  private async _buildComparisonSummary(
+    record: PinnedComparisonRecord
+  ): Promise<UnitComparisonDiffSummary> {
+    const deadline = Date.now() + COMPARISON_SUMMARY_BUDGET_MS
+    const units: UnitComparisonUnitSummaryEntry[] = []
+    for (const unit of record.session.units) {
+      units.push(await this._buildComparisonUnitSummaryEntry(record, unit, deadline))
+    }
+    const totals = {
+      units: units.length,
+      added: 0,
+      removed: 0,
+      changed: 0,
+      unchanged: 0,
+      unavailable: 0
+    }
+    for (const unit of units) {
+      if (unit.activity.availability === 'unavailable') totals.unavailable += 1
+      if (unit.status !== 'unchanged') totals[unit.status] += 1
+    }
+    return {
+      schemaVersion: 1,
+      comparisonId: record.session.comparisonId,
+      createdAt: record.session.createdAt,
+      // Overridden with the live value on every read.
+      stale: false,
+      units,
+      totals,
+      productStats: {
+        availability: 'unavailable',
+        reason: 'requires-semantic-comparison'
+      }
+    }
+  }
+
+  private async _buildComparisonUnitSummaryEntry(
+    record: PinnedComparisonRecord,
+    unit: UnitComparisonSummary,
+    deadline: number
+  ): Promise<UnitComparisonUnitSummaryEntry> {
+    const leftUnit = record.left.units.get(unit.unitId)
+    const rightUnit = record.right.units.get(unit.unitId)
+    const status: UnitComparisonUnitChangeStatus =
+      unit.presence === 'right-only'
+        ? 'added'
+        : unit.presence === 'left-only'
+          ? 'removed'
+          : leftUnit !== undefined && rightUnit !== undefined && leftUnit.revision === rightUnit.revision
+            ? 'unchanged'
+            : 'changed'
+    return {
+      unitId: unit.unitId,
+      type: unit.type,
+      name: unit.name,
+      presence: unit.presence,
+      status,
+      ...(leftUnit === undefined ? {} : { leftRevision: leftUnit.revision }),
+      ...(rightUnit === undefined ? {} : { rightRevision: rightUnit.revision }),
+      activity: await this._buildComparisonUnitActivity(record, unit, status, deadline)
+    }
+  }
+
+  private async _buildComparisonUnitActivity(
+    record: PinnedComparisonRecord,
+    unit: UnitComparisonSummary,
+    status: UnitComparisonUnitChangeStatus,
+    deadline: number
+  ): Promise<UnitComparisonUnitSummaryActivity> {
+    if (status === 'unchanged') {
+      return {
+        availability: 'ok',
+        leftChangesetCount: 0,
+        rightChangesetCount: 0,
+        mutationCount: 0
+      }
+    }
+    if (status === 'added' || status === 'removed') {
+      // A single-sided Unit has no common base to count changes against; its fine-grained diff
+      // compares against a mirrored empty side instead.
+      return { availability: 'unavailable', reason: 'history-unavailable' }
+    }
+    if (Date.now() > deadline) {
+      return { availability: 'unavailable', reason: 'budget-exceeded' }
+    }
+    try {
+      const history = await this._comparisonHistory(record, unit.unitId)
+      if (history.fidelity !== 'history') {
+        return { availability: 'unavailable', reason: 'history-unavailable' }
+      }
+      return {
+        availability: 'ok',
+        leftChangesetCount: history.leftChangesets.length,
+        rightChangesetCount: history.rightChangesets.length,
+        mutationCount:
+          history.leftChangesets.reduce((sum, changeset) => sum + changeset.mutations.length, 0) +
+          history.rightChangesets.reduce((sum, changeset) => sum + changeset.mutations.length, 0)
+      }
+    } catch {
+      return { availability: 'unavailable', reason: 'history-unavailable' }
+    }
+  }
+
   private async _prepareUnitComparisonContext(
     rightWorktreeId: string,
     comparisonId: string,
@@ -537,6 +684,7 @@ export class CollabService {
     for (const key of this._preparedComparisonContexts.keys()) {
       if (key.startsWith(prefix)) this._preparedComparisonContexts.delete(key)
     }
+    this._comparisonSummaries.delete(comparisonId)
   }
 
   public async createWorktreeUnit(

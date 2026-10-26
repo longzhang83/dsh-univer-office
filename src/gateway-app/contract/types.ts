@@ -608,3 +608,70 @@ export interface UnitComparisonContext {
 export interface UnitComparisonContextResponse extends ErrorEnvelope {
   readonly context?: UnitComparisonContext
 }
+
+/** Why a summary section reports no numbers instead of the real ones. */
+export type UnitComparisonSummaryDegradationReason =
+  /** Product-semantic block statistics only come from the fine-grained `/diff` comparison engine. */
+  | 'requires-semantic-comparison'
+  /** The summary wall-clock budget ran out before this section was reached. */
+  | 'budget-exceeded'
+  /** No common changeset history exists for this Unit (added/removed, snapshot fidelity, or read failure). */
+  | 'history-unavailable'
+
+/**
+ * Changeset-level activity of one Unit since the pinned common base. Counts come straight from the
+ * changeset streams the fine-grained diff also reads; snapshots are never materialized for them.
+ */
+export interface UnitComparisonUnitSummaryActivity {
+  readonly availability: 'ok' | 'unavailable'
+  readonly reason?: UnitComparisonSummaryDegradationReason
+  readonly leftChangesetCount?: number
+  readonly rightChangesetCount?: number
+  /** Protocol mutations across both sides' changesets since the common base revision. */
+  readonly mutationCount?: number
+}
+
+/** Whether one paired Unit's pinned heads differ, derived without any IO from the pinned session. */
+export type UnitComparisonUnitChangeStatus = 'added' | 'removed' | 'unchanged' | 'changed'
+
+/** One Unit's entry of the cheap layered comparison summary. */
+export interface UnitComparisonUnitSummaryEntry {
+  readonly unitId: string
+  readonly type: UnitType
+  readonly name: string
+  readonly presence: UnitComparisonPresence
+  readonly status: UnitComparisonUnitChangeStatus
+  readonly leftRevision?: number
+  readonly rightRevision?: number
+  readonly activity: UnitComparisonUnitSummaryActivity
+}
+
+/**
+ * Versioned, cheap whole-comparison summary served before any fine-grained `/diff` call. It never
+ * materializes snapshots: statuses come from pinned heads, activity from changeset streams, and
+ * product-semantic block statistics (Sheet row/column counts, Slide page lists, Doc paragraph
+ * deltas) stay `unavailable` because only the comparison engine can compute them.
+ */
+export interface UnitComparisonDiffSummary {
+  readonly schemaVersion: 1
+  readonly comparisonId: string
+  readonly createdAt: string
+  readonly stale: boolean
+  readonly units: readonly UnitComparisonUnitSummaryEntry[]
+  readonly totals: {
+    readonly units: number
+    readonly added: number
+    readonly removed: number
+    readonly changed: number
+    readonly unchanged: number
+    readonly unavailable: number
+  }
+  readonly productStats: {
+    readonly availability: 'unavailable'
+    readonly reason: UnitComparisonSummaryDegradationReason
+  }
+}
+
+export interface UnitComparisonDiffSummaryResponse extends ErrorEnvelope {
+  readonly summary?: UnitComparisonDiffSummary
+}

@@ -23,6 +23,7 @@ import type {
   UnitSummary,
   UnitComparisonContextQuery,
   UnitComparisonContextResponse,
+  UnitComparisonDiffSummaryResponse,
   UnitComparisonResponse
 } from './types.js'
 
@@ -223,6 +224,20 @@ export class WorktreeControlClient {
     const suffix = params.size === 0 ? '' : `?${params.toString()}`
     return this.getJson<UnitComparisonContextResponse>(
       `${this.base}/worktrees/${rightWorktreeId}/comparisons/${encodeURIComponent(comparisonId)}/units/${encodeURIComponent(unitId)}/diff${suffix}`
+    )
+  }
+
+  /**
+   * Fetch the cheap layered summary of a pinned comparison: per-Unit change status plus
+   * changeset-level activity, without materializing snapshots. Fine-grained block statistics stay
+   * with `getUnitComparisonContext`; `summary.stale` follows the same explicit-refresh contract.
+   */
+  public getUnitComparisonDiffSummary(
+    rightWorktreeId: string,
+    comparisonId: string
+  ): Promise<UnitComparisonDiffSummaryResponse> {
+    return this.getJson<UnitComparisonDiffSummaryResponse>(
+      `${this.base}/worktrees/${rightWorktreeId}/comparisons/${encodeURIComponent(comparisonId)}/diff/summary`
     )
   }
 

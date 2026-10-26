@@ -661,6 +661,26 @@ async function handleWorktrees(
     return
   }
 
+  // /uf/<enc>/worktrees/<worktreeId>/comparisons/<comparisonId>/diff/summary — cheap layered
+  // summary for "which Unit to open first" navigation. It reports per-Unit change status from the
+  // pinned heads plus changeset-level activity, and never materializes snapshots; fine-grained
+  // block statistics stay with the per-Unit /diff endpoint above.
+  if (
+    sub.length === 4 &&
+    sub[0] === 'comparisons' &&
+    sub[2] === 'diff' &&
+    sub[3] === 'summary' &&
+    method === 'GET'
+  ) {
+    try {
+      const summary = await collab.getUnitComparisonSummary(worktreeId, sub[1] ?? '')
+      sendJson(res, 200, { error: { code: 1, message: '' }, summary })
+    } catch (error) {
+      sendJson(res, 200, { error: toErrorDetail(error) })
+    }
+    return
+  }
+
   // /uf/<enc>/worktrees/<worktreeId>/preview — read-only merge preview summary (MergePreview).
   if (sub.length === 1 && sub[0] === 'preview' && method === 'GET') {
     try {

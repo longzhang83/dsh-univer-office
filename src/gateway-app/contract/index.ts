@@ -16,6 +16,8 @@ export type {
   WorktreeLifecycleEvent,
   MergeUnitStatus,
   MergeUnitPreview,
+  MergeSemanticCheck,
+  MergeSemanticCheckStatus,
   MergePreview,
   MergePreviewResponse,
   MergePreviewUnitResponse,

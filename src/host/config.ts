@@ -55,6 +55,10 @@ export interface Config {
   stateCacheTtlMs?: number
   /** Freshness window for changed-unit reads. */
   unitCacheTtlMs?: number
+  /** Run report-only semantic checks over merged Units and attach warnings to merge results. */
+  mergeSemanticChecks?: boolean
+  /** Overall time budget for one merge semantic check phase; checks never block the merge outcome. */
+  mergeSemanticChecksTimeoutMs?: number
   /** Register model-facing `univer_*` tools. */
   tools?: boolean
   /** Register version-matched bundled Univer skills. */
@@ -86,6 +90,8 @@ export interface ResolvedConfig {
   readonly unitContentCommitTimeoutMs: number
   readonly stateCacheTtlMs: number
   readonly unitCacheTtlMs: number
+  readonly mergeSemanticChecks: boolean
+  readonly mergeSemanticChecksTimeoutMs: number
   readonly tools: boolean
   readonly skills: boolean
   readonly telemetry: boolean
@@ -127,6 +133,8 @@ export const Config: z<Config> = z.object({
   unitContentCommitTimeoutMs: z.natural().default(5_000),
   stateCacheTtlMs: z.natural().default(1_000),
   unitCacheTtlMs: z.natural().default(5_000),
+  mergeSemanticChecks: z.boolean().default(true),
+  mergeSemanticChecksTimeoutMs: z.natural().default(20_000),
   tools: z.boolean().default(true),
   skills: z.boolean().default(true),
   telemetry: z.boolean().default(true)
@@ -157,6 +165,8 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     unitContentCommitTimeoutMs: config.unitContentCommitTimeoutMs ?? 5_000,
     stateCacheTtlMs: config.stateCacheTtlMs ?? 1_000,
     unitCacheTtlMs: config.unitCacheTtlMs ?? 5_000,
+    mergeSemanticChecks: config.mergeSemanticChecks ?? true,
+    mergeSemanticChecksTimeoutMs: config.mergeSemanticChecksTimeoutMs ?? 20_000,
     tools: config.tools ?? true,
     skills: config.skills ?? true,
     telemetry: config.telemetry ?? true
@@ -183,7 +193,8 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     renderCacheMaxEntries: resolved.renderCacheMaxEntries,
     unitContentCommitTimeoutMs: resolved.unitContentCommitTimeoutMs,
     stateCacheTtlMs: resolved.stateCacheTtlMs,
-    unitCacheTtlMs: resolved.unitCacheTtlMs
+    unitCacheTtlMs: resolved.unitCacheTtlMs,
+    mergeSemanticChecksTimeoutMs: resolved.mergeSemanticChecksTimeoutMs
   })) {
     if (!Number.isSafeInteger(value) || value < 1)
       throw new Error(`univer: ${name} must be a positive integer`)

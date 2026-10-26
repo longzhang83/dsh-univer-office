@@ -4,14 +4,23 @@ import { Buffer } from 'node:buffer'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import type { ResolvedConfig } from '../config.ts'
-import type { WorktreeActionResult } from '../../shared/wire/actions.ts'
+import type {
+  MergeSemanticCheck,
+  WorktreeActionResult
+} from '../../shared/wire/actions.ts'
 import type { FileState, WorktreeState, ChangedUnit } from '../../shared/wire/state.ts'
 import type { EnsureGatewayResult, GatewayStatus } from '../../shared/wire/status.ts'
 import { VIEWER_BASE } from '../../shared/wire/viewer.ts'
 import { GatewayClient, gatewayErrorMessage } from '../adapters/gateway/client.ts'
 import { GatewayFileApi, fileKeyOf } from '../adapters/gateway/file-api.ts'
 import { GatewayWorktreeApi } from '../adapters/gateway/worktree-api.ts'
-import { isRecord, mapUnits, mapWorktrees, unitKind } from '../adapters/gateway/mapping.ts'
+import {
+  isRecord,
+  mapUnits,
+  mapWorktrees,
+  unitKind,
+  type GatewayUnit
+} from '../adapters/gateway/mapping.ts'
 import type {
   ApiReferenceRequest,
   ExecuteUnitContentRequest,
@@ -35,7 +44,8 @@ import type {
   UniverOperationResult,
   UniverResourceResult,
   WorktreeActionRequest,
-  WorktreeOperationRequest
+  WorktreeOperationRequest,
+  WorkspacePath
 } from '../service/types.ts'
 import { UniverError } from '../service/errors.ts'
 import { UniverService } from '../service/univer-service.ts'
@@ -44,6 +54,10 @@ import { GatewaySupervisor } from '../processes/gateway/supervisor.ts'
 import { UnitContentOperations } from './unit-content-operations.ts'
 import { StateCache } from './state-cache.ts'
 import { WorktreeOperations } from './worktree-operations.ts'
+import {
+  listMergedUnits,
+  MergeSemanticChecks
+} from './merge-semantic-checks.ts'
 import { RenderOperations, writePdf } from './render-operations.ts'
 import { RenderSourceOperations } from './render-source-operations.ts'
 import { RenderArtifactCache, assertCachedImageName, renderCacheKey } from './render-cache.ts'
@@ -54,6 +68,7 @@ export class GatewayUniverService extends UniverService {
   private readonly gatewaySupervisor: GatewaySupervisor
   private readonly unitContent: UnitContentOperations
   private readonly worktrees: WorktreeOperations
+  private readonly mergeChecks: MergeSemanticChecks
   private readonly render: RenderOperations
   private readonly renderSources: RenderSourceOperations
   private readonly renderCache: RenderArtifactCache | undefined
@@ -78,6 +93,7 @@ export class GatewayUniverService extends UniverService {
       config.gatewayMutationTimeoutMs
     )
     this.render = new RenderOperations(config.browserExecutablePath)
+    this.mergeChecks = new MergeSemanticChecks(this.unitContent, this.render)
     this.renderSources = new RenderSourceOperations(
       this.unitContent,
       config.gatewayRequestTimeoutMs
@@ -121,6 +137,17 @@ export class GatewayUniverService extends UniverService {
     await assertAuthorizedPath(request.workspace, request.file, true)
     const available = await this.ensureGateway()
     if (!available.ok) return { ok: false, reason: available.reason }
+    // Capture the merge scope before the transition; a merged worktree may no
+    // longer serve its Unit listing.
+    const mergedUnits =
+      request.action === 'merge' && this.config.mergeSemanticChecks
+        ? await listMergedUnits(
+            available.gateway,
+            request.file,
+            request.worktreeId,
+            this.config.gatewayRequestTimeoutMs
+          ).catch(() => undefined)
+        : undefined
     try {
       await this.worktrees.action(
         available.gateway,
@@ -129,11 +156,18 @@ export class GatewayUniverService extends UniverService {
         request.action
       )
       this.invalidate(request.file, request.worktreeId)
+      const semanticChecks =
+        mergedUnits === undefined
+          ? undefined
+          : await this.runMergeChecks(available.gateway, request, mergedUnits)
       return {
         ok: true,
         action: request.action,
         worktreeId: request.worktreeId,
-        state: await this.fileState({ workspace: request.workspace, file: request.file })
+        state: await this.fileState({ workspace: request.workspace, file: request.file }),
+        ...(semanticChecks === undefined || semanticChecks.length === 0
+          ? {}
+          : { semanticChecks })
       }
     } catch (error) {
       this.invalidate(request.file, request.worktreeId)
@@ -231,6 +265,17 @@ export class GatewayUniverService extends UniverService {
     const api = new GatewayWorktreeApi(
       new GatewayClient(gateway, this.config.gatewayMutationTimeoutMs)
     )
+    // Capture the merge scope before the transition; a merged worktree may no
+    // longer serve its Unit listing.
+    const mergedUnits =
+      request.action === 'merge' && this.config.mergeSemanticChecks
+        ? await listMergedUnits(
+            gateway,
+            request.file,
+            request.worktreeId,
+            this.config.gatewayRequestTimeoutMs
+          ).catch(() => undefined)
+        : undefined
     const result =
       request.action === 'create'
         ? await api.create(request.file, request.name)
@@ -239,11 +284,21 @@ export class GatewayUniverService extends UniverService {
     signal?.throwIfAborted()
     const id = worktreeResultId(result, request)
     this.invalidate(request.file, id)
+    const semanticChecks =
+      mergedUnits === undefined
+        ? undefined
+        : await this.runMergeChecks(gateway, request, mergedUnits)
     return {
       ok: true,
       operation: 'worktree',
       file: request.file,
-      result: { action: request.action, ...asRecord(result) }
+      result: {
+        action: request.action,
+        ...asRecord(result),
+        ...(semanticChecks === undefined || semanticChecks.length === 0
+          ? {}
+          : { semanticChecks })
+      }
     }
   }
 
@@ -677,6 +732,30 @@ export class GatewayUniverService extends UniverService {
     return new GatewayWorktreeApi(
       new GatewayClient(gateway, this.config.gatewayMutationTimeoutMs)
     ).action(request.file, request.worktreeId, request.action)
+  }
+
+  /**
+   * Run report-only semantic checks over the Units a merge published. The
+   * checks run against trunk because the worktree content is now merged;
+   * they never reject and never change the merge result they report on.
+   */
+  private async runMergeChecks(
+    gateway: string,
+    request: { readonly workspace: WorkspacePath; readonly file: string },
+    mergedUnits: readonly GatewayUnit[]
+  ): Promise<readonly MergeSemanticCheck[]> {
+    try {
+      return await this.mergeChecks.run({
+        gateway,
+        workspace: request.workspace,
+        file: request.file,
+        units: mergedUnits,
+        timeoutMs: this.config.mergeSemanticChecksTimeoutMs
+      })
+    } catch {
+      // Defense in depth: checks must never fail the merge that already succeeded.
+      return []
+    }
   }
 
   private async requireWorktreeStatus(

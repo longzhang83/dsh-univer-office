@@ -1,4 +1,4 @@
-import type { MergePreview, MergeUnitPreview, WorktreeStatus } from './contract/index.js'
+import type { MergePreview, MergeSemanticCheck, MergeUnitPreview, WorktreeStatus } from './contract/index.js'
 import type { IChangeset, IDeserializedSheetBlock, ISnapshot } from '@univerjs/protocol'
 
 /**
@@ -58,4 +58,4 @@ export interface MergePreviewUnitData {
   error?: string
 }
 
-export type { MergePreview, MergeUnitPreview }
+export type { MergePreview, MergeSemanticCheck, MergeUnitPreview }

@@ -3,6 +3,7 @@ import {
   type PinnedUnitComparisonRef,
   type UnitComparisonRefRequest,
   type UnitComparisonSession,
+  UNIT_TYPE_SHEET,
   type UnitType
 } from './contract/index.js'
 import type {
@@ -40,6 +41,7 @@ import type {
   MergeOutcome,
   MergePreview,
   MergePreviewUnitData,
+  MergeSemanticCheck,
   MergeUnitPreview,
   WorktreeCreatedUnit,
   WorktreeRecord
@@ -734,12 +736,14 @@ export class CollabService {
         baseStale
       })
     }
+    const semanticChecks = previewSemanticChecks(units)
     return {
       worktreeId,
       mergeable: units.every((unit) => unit.status !== 'conflict'),
       diverged: units.some((unit) => unit.baseStale),
       units,
-      conflicts: units.filter((unit) => unit.status === 'conflict').map((unit) => unit.unitId)
+      conflicts: units.filter((unit) => unit.status === 'conflict').map((unit) => unit.unitId),
+      ...(semanticChecks.length === 0 ? {} : { semanticChecks })
     }
   }
 
@@ -1400,6 +1404,39 @@ function previewUnitData(
     snapshot,
     ...(sheetBlocks === undefined ? {} : { sheetBlocks })
   }
+}
+
+/**
+ * report-only 语义警告,只使用预览摘要已有的元数据,不物化 snapshot、不拖慢预览。
+ * 删除 unit 是跨 Unit 引用断裂的直接风险源,但校验引用完整性需要扫描其它 Unit
+ * 的公式,超出本边界;Sheet 的公式求值发生在 Viewer 加载合并结果之后,同样不可用,
+ * 因此都按契约显式标注,而不是静默跳过。
+ */
+function previewSemanticChecks(units: MergeUnitPreview[]): MergeSemanticCheck[] {
+  const checks: MergeSemanticCheck[] = []
+  for (const unit of units) {
+    if (unit.status === 'deleted') {
+      checks.push({
+        kind: 'cross-unit-reference',
+        status: 'warn',
+        unitId: unit.unitId,
+        summary: `Unit ${unit.name === '' ? unit.unitId : unit.name} is deleted by this merge; references from other Units cannot be verified here.`
+      })
+    }
+  }
+  const sheetTouched = units.some(
+    (unit) =>
+      unit.type === UNIT_TYPE_SHEET && (unit.status === 'created' || unit.status === 'modified')
+  )
+  if (sheetTouched) {
+    checks.push({
+      kind: 'formula',
+      status: 'unavailable',
+      summary:
+        'Formula evaluation is not available in merge preview; the Viewer computes formulas when the merged snapshot loads.'
+    })
+  }
+  return checks
 }
 
 function deserializeSheetBlocks(

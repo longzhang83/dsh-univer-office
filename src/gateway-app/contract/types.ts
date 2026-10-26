@@ -216,6 +216,22 @@ export interface MergeUnitPreview {
   baseStale: boolean
 }
 
+/** report-only 语义检查的结论。`unavailable` 表示当前边界内没有执行该检查的能力。 */
+export type MergeSemanticCheckStatus = 'pass' | 'warn' | 'unavailable' | 'error'
+
+/**
+ * 一条 report-only 合并语义检查。OT 成功只保证操作可变换,不保证业务语义,
+ * 因此 merge preview 与 merge 结果可以携带这些条目供人审阅;它们不改变合并结果。
+ */
+export interface MergeSemanticCheck {
+  kind: 'structure' | 'layout' | 'formula' | 'cross-unit-reference'
+  status: MergeSemanticCheckStatus
+  summary: string
+  /** 条目指向的 unit;文件级条目省略。 */
+  unitId?: string
+  details?: unknown
+}
+
 /** 合并预览摘要(`GET /uf/<enc>/worktrees/<id>/preview`)。 */
 export interface MergePreview {
   worktreeId: string
@@ -226,6 +242,8 @@ export interface MergePreview {
   units: MergeUnitPreview[]
   /** status === "conflict" 的 unitId 列表。 */
   conflicts: string[]
+  /** report-only 语义警告;仅在有条目时出现,向后兼容的可选字段。 */
+  semanticChecks?: MergeSemanticCheck[]
 }
 
 export interface MergePreviewResponse extends ErrorEnvelope, MergePreview {}

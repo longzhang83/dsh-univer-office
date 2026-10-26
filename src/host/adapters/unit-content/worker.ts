@@ -74,7 +74,8 @@ export class UnitContentWorker {
   }
 }
 
-function workerDiagnostic(stderr: readonly Buffer[], fallback: string): string {
+/** Format one stderr capture into a bounded diagnostic message. */
+export function workerDiagnostic(stderr: readonly Buffer[], fallback: string): string {
   const diagnostic = Buffer.concat(stderr)
     .toString('utf8')
     .replace(/\p{Cc}/gu, (character) =>
@@ -86,7 +87,8 @@ function workerDiagnostic(stderr: readonly Buffer[], fallback: string): string {
   return `${fallback} ${diagnostic.length <= limit ? diagnostic : `${diagnostic.slice(0, limit)}…`}`
 }
 
-function unitContentWorkerEnvironment(): NodeJS.ProcessEnv {
+/** Environment for a package-local Unit content worker child process. */
+export function unitContentWorkerEnvironment(): NodeJS.ProcessEnv {
   const env = Object.fromEntries(
     ['HOME', 'LANG', 'LC_ALL', 'PATH', 'TMPDIR'].flatMap((key) => {
       const value = process.env[key]

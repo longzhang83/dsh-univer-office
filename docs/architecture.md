@@ -16,12 +16,12 @@
 - `tools` 把适合模型调用的内容创作能力映射为 DSH 工具；
 - `skills` 向 DSH Skill Registry 提供按需加载的 Univer 工作流与 Unit 专项知识；
 - `processes/gateway` 负责插件内置 Gateway 进程和 Viewer 资源；
-- `workers/unit-content` 是一次性 Unit Content Worker 的子进程入口；
+- `workers/unit-content` 是 Unit Content Worker 的子进程入口，支持按请求循环保活；
 - `client` 负责 DSH 浏览器端的预览、实时 worktree 窗口和用户审阅界面；
 - `shared/wire` 只存放 Host 与 Client 共享的纯 JSON 数据类型；
 - `telemetry` 提供 best-effort 的匿名产品遥测，只在 Host 与包卸载入口发送，发布包不声明 `postinstall`，任何失败都不影响启动与卸载。
 
-用户只安装本插件即可使用全部功能。全局 `univer` CLI 不属于运行依赖；Unit 的导入、检查、执行和导出由插件内置的一次性 Unit Content Worker 完成。
+用户只安装本插件即可使用全部功能。全局 `univer` CLI 不属于运行依赖；Unit 的导入、检查、执行和导出由插件内置的 Unit Content Worker 完成（默认经过有界 Worker 池复用，可配置退回一次性模式）。
 
 代码、API 和界面使用具体名称 `Gateway`、`Viewer`、`Unit Content Worker` 和 `artifacts`，不使用含义宽泛的 `runtime` 或 `daemon` 作为本插件领域名称。
 
@@ -67,7 +67,7 @@ flowchart LR
     Provider --> GatewaySupervisor["Gateway Supervisor"]
     GatewaySupervisor --> Gateway["Bundled Gateway process"]
     GatewayAdapter --> Gateway
-    UnitContentAdapter --> Worker["Bundled one-shot Unit Content Worker"]
+    UnitContentAdapter --> Worker["Bundled Unit Content Worker pool"]
     Worker --> Gateway
     Browser --> Viewer["Bundled Viewer served by Gateway"]
 ```
@@ -307,7 +307,7 @@ live session 的 `cwd` 内；后续 `/uf` 与隧道请求不设置或读取插�
 Gateway 本身始终只监听 loopback，不对外暴露。完整契约见
 `docs/viewer-same-origin-deployment.md`。
 
-Unit 的导入、检查、执行和导出由 Unit Content Adapter 启动一次性 Unit Content Worker。Worker 连接 Gateway Supervisor 提供的同一个 Gateway，操作完成或取消后退出，不拥有独立持久状态。Gateway 的 worktree 控制面直接提供 Unit 创建与移除端点，并通过 collaboration service 与 lifecycle event 完成操作。写操作只能针对显式 draft worktree；Gateway 是提交结果和 revision 的唯一依据。
+Unit 的导入、检查、执行和导出由 Unit Content Adapter 通过有界的 Unit Content Worker 池完成（默认最多 2 个热 Worker，可配置；`unitContentWorkerPool: false` 退回一次性进程）。子进程按换行分隔的请求循环服务，每个请求都走完整的任务生命周期——collaboration runtime 在单次 `main()` 内创建并关闭，子进程不持有跨请求的 Unit、worktree 或文件状态。复用安全依赖该请求边界加保守回收：每个 Worker 完成上限（默认 20）个任务后强制重建，空闲超时（默认 60 秒）后回收；任务取消、超时、崩溃或协议错误都会销毁该 Worker 并按需重建替代，绝不回池。池在 Gateway 就绪后预热，插件卸载时随 fiber effect 全量回收，不留孤儿。Worker 连接 Gateway Supervisor 提供的同一个 Gateway，不拥有独立持久状态。Gateway 的 worktree 控制面直接提供 Unit 创建与移除端点，并通过 collaboration service 与 lifecycle event 完成操作。写操作只能针对显式 draft worktree；Gateway 是提交结果和 revision 的唯一依据。
 
 Gateway 通过 SDK `register(router)` 注册 HTTP/WebSocket Endpoint，连接跟踪保留路由参数，并在打开失败或关闭时释放记录。Worktree Unit 删除保留应用现有流程；SDK 的可撤销移除接口 `setUnitRemoved` 在本地 Adapter 中明确返回 `INVALID_REQUEST`，不写入移除状态或改变文件格式。Gateway 为 SDK collaboration service 注入 `ILogger`：warn/error 始终写入 Gateway stderr，debug/info 仅在 `UNIVER_DSH_GATEWAY_DEBUG=1` 时输出；SDK 内部失败若没有该 logger 只会表现为不可诊断的通用 500。数据库 Adapter 遵循 SDK 的快照读取契约（`getChangesets`/`getDraftChangesets` 返回裸 changeset 数组，`null` 表示 Unit 不存在）。
 

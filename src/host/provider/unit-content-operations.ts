@@ -4,6 +4,8 @@ import type {
   UnitContentInspectionQuery,
   UnitContentWorkerTarget
 } from '../adapters/unit-content/protocol.ts'
+import type { UnitContentWorkerPoolSettings } from '../adapters/unit-content/worker-pool.ts'
+import { UnitContentWorkerPool } from '../adapters/unit-content/worker-pool.ts'
 import { GatewayClient } from '../adapters/gateway/client.ts'
 import { GatewayFileApi, fileKeyOf } from '../adapters/gateway/file-api.ts'
 import { isRecord, mapUnits, type GatewayUnit } from '../adapters/gateway/mapping.ts'
@@ -39,14 +41,31 @@ export function resolveExportFile(value: string): string {
 
 /** Package-local Unit content operations over one Gateway and isolated workers. */
 export class UnitContentOperations {
+  /** One-shot runner kept for the pooling-disabled fallback path. */
   private readonly worker: UnitContentWorker
+  private readonly pool: UnitContentWorkerPool | undefined
 
   constructor(
     private readonly gatewayRequestTimeoutMs: number,
     private readonly unitContentCommitTimeoutMs: number,
-    unitContentOperationTimeoutMs: number
+    unitContentOperationTimeoutMs: number,
+    poolSettings?: UnitContentWorkerPoolSettings
   ) {
     this.worker = new UnitContentWorker(unitContentOperationTimeoutMs)
+    this.pool =
+      poolSettings?.enabled === true
+        ? new UnitContentWorkerPool(poolSettings, unitContentOperationTimeoutMs)
+        : undefined
+  }
+
+  /** Spawn warm workers ahead of the first task; no-op when pooling is disabled. */
+  prewarm(): void {
+    this.pool?.prewarm()
+  }
+
+  /** Stop pooled workers; one-shot workers exit by themselves. */
+  async dispose(): Promise<void> {
+    await this.pool?.dispose()
   }
 
   /** Inspect one file, unit, or Sheet range. */
@@ -61,7 +80,7 @@ export class UnitContentOperations {
       request.unitId,
       request.worktreeId
     )
-    const result = await this.worker.run(
+    const result = await this.runWorker(
       {
         ...target,
         operation: 'inspect',
@@ -82,7 +101,7 @@ export class UnitContentOperations {
     signal?: AbortSignal
   ): Promise<UniverOperationResult> {
     const target = await this.resolveTarget(gateway, file, unitId, worktreeId)
-    const result = await this.worker.run(
+    const result = await this.runWorker(
       { ...target, operation: 'execute', code, worktreeId },
       signal
     )
@@ -101,7 +120,7 @@ export class UnitContentOperations {
       request.unitId,
       request.worktreeId
     )
-    const result = await this.worker.run(
+    const result = await this.runWorker(
       {
         ...target,
         operation: 'export',
@@ -124,7 +143,7 @@ export class UnitContentOperations {
     readonly unitData: { [key: string]: JsonValue }
   }> {
     const target = await this.resolveTarget(gateway, file, unitId, worktreeId)
-    const value = await this.worker.run({ ...target, operation: 'render-source' }, signal)
+    const value = await this.runWorker({ ...target, operation: 'render-source' }, signal)
     if (!isRecord(value) || !isUnitKind(value.unitType) || !isRecord(value.unitData)) {
       throw new UniverError(
         'Unit content worker returned an invalid render source.',
@@ -155,6 +174,16 @@ export class UnitContentOperations {
         signal
       )
       .then((snapshot) => ({ kind, snapshot }))
+  }
+
+  /** Route one request through the pool, or the one-shot worker when pooling is off. */
+  private runWorker(
+    request: UnitContentWorkerRequest,
+    signal?: AbortSignal
+  ): Promise<JsonValue> {
+    return this.pool === undefined
+      ? this.worker.run(request, signal)
+      : this.pool.run(request, signal)
   }
 
   private async resolveTarget(

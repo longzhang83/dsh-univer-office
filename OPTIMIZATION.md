@@ -2,7 +2,7 @@
 
 Branch: `optimize/p0-p1` (baseline: `dream-num/dsh-univer-office@8f85ce4`)
 
-Six independently reviewed changes, merged from `opt/render-cache`, `opt/merge-guard`, `opt/worker-pool`, `opt/gateway-perf`, `opt/verification-tests`. 30 files changed, +2160 / −114. All changed TypeScript files pass esbuild syntax validation, and 52 behaviour tests pass.
+Nine independently reviewed changes, merged from `opt/render-cache`, `opt/merge-guard`, `opt/worker-pool`, `opt/gateway-perf`, `opt/verification-tests`, `opt/sqlite-perf`, `opt/ws-push`, `opt/diff-summary`. 46 files changed, +4300 / −350 approx. All changed TypeScript files (33) pass esbuild syntax validation, and 52 behaviour tests pass.
 
 ## 1. Render artifact cache (P0, `fdcc8b1`)
 
@@ -90,9 +90,29 @@ patched; only their unavailable dependencies are.
 - Merge-check wiring: `semanticChecks` on the Gateway merge response and the Tools result. Suggested integration test: merge a worktree with a Sheet + Slide and assert one `structure` entry per Unit plus `unavailable` formula and a real `layout` verdict.
 - PDF lint/print output verification (needs a real render machine).
 
+## 7. SQLite WAL + payload compression (P2, `b6bb836`)
+
+`univerfile-sqlite/payload-codec.ts` (new) + connection/read-write split across adapters.
+
+- WAL confirmed supported by the libsql native binding; `PRAGMA journal_mode=WAL` failure silently keeps the legacy journal mode. Lazy read-only connection carries pure reads; writes keep their connection; dispose runs `wal_checkpoint(TRUNCATE)` after closing the read connection. Migration/verify/optimizer connections stay on the default journal so candidate files never carry `-wal`/`-shm` and the Windows helper-process replacement flow is untouched.
+- Payload compression: changeset/snapshot payloads >4 KiB are stored gzip with a `univer-z1:` prefix; the read path detects the prefix and transparently decompresses. Old plaintext rows keep working (no migration); `payloadCompression` can be disabled. Compression happens outside the write transaction.
+
+## 8. WS push with polling fallback (P2, `0f29f14`)
+
+`src/client/api/univer-events.ts` (new) + `use-univer-state.ts` rework. Zero server-side changes: reuses Gateway lifecycle events through the existing `/univer-viewer/ws?target=` tunnel.
+
+- Push frames are invalidation hints only; authoritative state always comes from the session-scoped `/univer-api/state` fetch, so cross-session injection is impossible. All channels ready → polling timer pauses; any channel missing → legacy 900 ms full polling as fallback; reconnect with exponential backoff (0.5→30 s, jittered) and a full refetch after each recovery.
+- Known gap (documented, not fixed): changeset-only edits (agent writes without worktree lifecycle events) arrive on the next lifecycle event or reconnect; parity with today's polling which is bounded by the 1 s Host state cache anyway.
+
+## 9. Comparison diff summary layer (P2, `449d80d`)
+
+`GET .../comparisons/<cmpId>/diff/summary` + typed client method, on top of the pinned-head comparison sessions.
+
+- Cheap Unit-level summary derived from pinned heads and the changeset stream **without materializing snapshots** (added/removed/unchanged/changed + changeset/mutation counts). Semantic block-level statistics honestly report `unavailable: requires-semantic-comparison`; the fine-grained `/diff` endpoint is unchanged and still used on demand.
+- 2 s wall-clock budget with per-Unit deadline; budget-exceeded degrades gracefully; results cached per comparisonId with stale overlay on live head changes.
+
 ## Deferred (documented, not implemented)
 
-- Layered (Unit→page→cell) diff for large documents
 - CPU-heavy tasks (diff/materialization) off the Gateway event loop via `worker_threads`
 - SQLite payload compression (zstd) + WAL + read/write connection split
 - WS push instead of Client polling (lower priority, UX-only)

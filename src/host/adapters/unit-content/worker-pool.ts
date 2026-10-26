@@ -55,7 +55,10 @@ export class UnitContentWorkerPool {
   prewarm(): void {
     if (this.disposed) return
     while (this.live.size < this.settings.size) {
-      this.track(new PooledUnitContentWorker())
+      // A prewarmed worker must land in the idle queue, otherwise `run()`
+      // finds no idle worker while `live.size` already sits at the pool size
+      // and waits forever for a release that will never happen.
+      this.park(this.track(new PooledUnitContentWorker()))
       poolLog(
         `prewarmed Unit Content Worker (${String(this.live.size)}/${String(this.settings.size)} live)`
       )
@@ -168,8 +171,17 @@ export class UnitContentWorkerPool {
   /** Return a finished worker to the pool or destroy it. */
   private release(worker: PooledUnitContentWorker, healthy: boolean): void {
     worker.endTask()
-    if (!healthy || this.disposed || worker.taskCount >= this.settings.maxTasksPerWorker) {
+    if (!healthy || worker.taskCount >= this.settings.maxTasksPerWorker) {
       void this.discard(worker, healthy ? 'task limit reached' : 'unhealthy')
+      return
+    }
+    this.park(worker)
+  }
+
+  /** Park a healthy, unused worker: hand it to a waiter or keep it idle. */
+  private park(worker: PooledUnitContentWorker): void {
+    if (this.disposed) {
+      void this.discard(worker, 'disposed')
       return
     }
     const waiter = this.waiters.shift()

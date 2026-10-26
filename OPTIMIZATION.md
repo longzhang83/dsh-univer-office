@@ -2,7 +2,7 @@
 
 Branch: `optimize/p0-p1` (baseline: `dream-num/dsh-univer-office@8f85ce4`)
 
-Three independently reviewed changes, merged from `opt/render-cache`, `opt/merge-guard`, `opt/worker-pool`. 19 files changed, +1577 / −67. All changed TypeScript files pass esbuild syntax validation.
+Six independently reviewed changes, merged from `opt/render-cache`, `opt/merge-guard`, `opt/worker-pool`, `opt/gateway-perf`, `opt/verification-tests`. 30 files changed, +2160 / −114. All changed TypeScript files pass esbuild syntax validation, and 52 behaviour tests pass.
 
 ## 1. Render artifact cache (P0, `fdcc8b1`)
 
@@ -28,11 +28,30 @@ Three independently reviewed changes, merged from `opt/render-cache`, `opt/merge
 - Reuse safety is conservative: the child protocol had no reset primitive, so each request still owns its full task lifecycle; isolation relies on the request boundary + task cap + idle recycle, not on assuming in-process state can be zeroed.
 - Cancel/timeout/crash/protocol error always destroys the worker (never returned to pool) and spawns a replacement. `dispose()` on the Cordis effect tears down all workers (SIGTERM → 3s → SIGKILL).
 
+## 4. Gateway snapshot checkpoints (P1, `5e46a13`)
+
+`src/gateway-app/snapshot-checkpoint.ts` (new) + wiring in `collab-service.ts`, `transport/http.ts`, `univerfile-sqlite/{index,database-adapters/collaboration-database-adapter}.ts`, contracts.
+
+- **Threshold-triggered, not timer-triggered**: when a trunk materialization replays ≥32 changesets, the materialized snapshot is written back so the next materialization starts from the nearest checkpoint instead of revision 0.
+- No new tables / component version bumps: `CURRENT_V3_TABLES` changes would break v3 detection and `pruneCandidateToUpportSchema`, so checkpoints land in the SDK's own `collaboration_snapshots`. Keeps last 4 per Unit + the revision-1 baseline; snapshots are derived data and can always be rebuilt by replay.
+- Touches none of the `history@2` rows, so segment primary keys, `endRevision` derivation, migration, backup verification (`verifyV3Candidate`) and the optimize-time history reset are unaffected. Write failures are swallowed and never affect the read path.
+
+## 5. Paged / on-demand merge preview (P1, `5e46a13`)
+
+- `GET .../preview/units/<unitId>` gains optional `blocks=omit`, `blockOffset`, `blockLimit`, plus a `blockManifest`; a new `GET .../preview/units/<unitId>/blocks` serves block pages.
+- Default responses keep every existing field and semantics unchanged (Viewer keeps its inline default).
+- Materialized results are cached per `(worktree, unit, trunk head)` (cap 32), so paging never re-runs the rebase/replay.
+
+## 6. Behaviour tests for 1–3 (`726a65b`)
+
+Three `node:test` suites under `test/` with no new dependencies. Sources load through a loader hook that stubs only *external* packages (`test/helpers/`), because this worktree has no `node_modules`; the modules under test are imported unmodified.
+
 ## Verification status
 
-- ✅ esbuild syntax validation on all 16 changed TS files
+- ✅ esbuild syntax validation on all changed TS files
 - ✅ Manual review of cache-key invalidation, degrade paths, dispose ordering, cancel paths
-- ✅ **Behaviour tests for the three new files (51 assertions-level tests, 51 pass / 0 fail)**
+- ✅ **52 behaviour tests, 52 pass / 0 fail** (`test/render-cache-smoke.mjs`, `test/merge-semantic-checks-smoke.mjs`, `test/worker-pool-smoke.mjs`), stable across repeated runs
+- ✅ Fixed a real bug the tests exposed: `prewarm()` now parks workers in the idle queue via the shared `park()` path (previously prewarmed workers were live but never handed out, hanging the first `run()`)
 - ⚠️ Not run: `pnpm typecheck` / build / integration tests (requires full dependency install incl. native bindings; not available in this environment)
 
 ### Behaviour tests
@@ -73,9 +92,10 @@ patched; only their unavailable dependencies are.
 
 ## Deferred (documented, not implemented)
 
-- Snapshot checkpointing for long changeset chains (needs Gateway storage layer work)
-- Paged/lazy merge-preview materialization (needs Gateway HTTP contract extension)
-- Layered (Unit→page→cell) diff; CPU-heavy tasks off the Gateway event loop; SQLite payload compression + WAL; WS push instead of polling — all multi-session/large-file optimizations, lower priority
+- Layered (Unit→page→cell) diff for large documents
+- CPU-heavy tasks (diff/materialization) off the Gateway event loop via `worker_threads`
+- SQLite payload compression (zstd) + WAL + read/write connection split
+- WS push instead of Client polling (lower priority, UX-only)
 - Formula-aware merge checks (blocked on upstream SDK capability)
 
 ## Pushing to your own fork

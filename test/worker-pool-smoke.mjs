@@ -265,6 +265,23 @@ describe('one-shot fallback', () => {
     for (const pid of pids) assert.equal(await waitUntilDead(pid), true)
   })
 
+  it('runs a task on a prewarmed worker instead of waiting forever', async () => {
+    const pool = makePool({ size: 1, maxTasksPerWorker: 4 })
+    pool.prewarm()
+    await waitForPids(1)
+
+    // Regression: workers created by prewarm() used to be tracked as live but
+    // never parked in the idle queue, so the first run() reached
+    // waitForWorker() and hung until something else released a worker.
+    const result = await Promise.race([
+      pool.run(request('ok')),
+      sleep(1_500).then(() => 'TIMEOUT')
+    ])
+
+    assert.notEqual(result, 'TIMEOUT', 'a prewarmed worker must serve the next task')
+    await pool.dispose()
+  })
+
   it('still completes a task through the one-shot worker, which then exits', async () => {
     const worker = new UnitContentWorker(3_000)
     const result = await worker.run(request('ok'))

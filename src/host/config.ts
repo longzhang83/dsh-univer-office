@@ -41,6 +41,14 @@ export interface Config {
   resourceDownloadTimeoutMs?: number
   /** Maximum lifetime of one resource-library tool operation. */
   resourceOperationTimeoutMs?: number
+  /** Cache screenshot and PDF artifacts keyed by file, revision, and render parameters. */
+  renderCache?: boolean
+  /** Persistent cache directory for rendered screenshots and PDFs. */
+  renderCacheRoot?: string
+  /** Maximum lifetime of one cached render artifact. */
+  renderCacheTtlMs?: number
+  /** Maximum number of cached render artifacts kept by LRU eviction. */
+  renderCacheMaxEntries?: number
   /** Maximum time to wait for a collaboration commit acknowledgement before confirming by pull. */
   unitContentCommitTimeoutMs?: number
   /** Freshness window for file state reads. */
@@ -71,6 +79,10 @@ export interface ResolvedConfig {
   readonly resourceCacheRoot: string
   readonly resourceDownloadTimeoutMs: number
   readonly resourceOperationTimeoutMs: number
+  readonly renderCache: boolean
+  readonly renderCacheRoot: string
+  readonly renderCacheTtlMs: number
+  readonly renderCacheMaxEntries: number
   readonly unitContentCommitTimeoutMs: number
   readonly stateCacheTtlMs: number
   readonly unitCacheTtlMs: number
@@ -108,6 +120,10 @@ export const Config: z<Config> = z.object({
   resourceCacheRoot: z.string(),
   resourceDownloadTimeoutMs: z.natural().default(15_000),
   resourceOperationTimeoutMs: z.natural().default(120_000),
+  renderCache: z.boolean().default(true),
+  renderCacheRoot: z.string(),
+  renderCacheTtlMs: z.natural().default(300_000),
+  renderCacheMaxEntries: z.natural().default(32),
   unitContentCommitTimeoutMs: z.natural().default(5_000),
   stateCacheTtlMs: z.natural().default(1_000),
   unitCacheTtlMs: z.natural().default(5_000),
@@ -134,6 +150,10 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     resourceCacheRoot: resolveResourceCacheRoot(config.resourceCacheRoot),
     resourceDownloadTimeoutMs: config.resourceDownloadTimeoutMs ?? 15_000,
     resourceOperationTimeoutMs: config.resourceOperationTimeoutMs ?? 120_000,
+    renderCache: config.renderCache ?? true,
+    renderCacheRoot: resolveRenderCacheRoot(config.renderCacheRoot),
+    renderCacheTtlMs: config.renderCacheTtlMs ?? 300_000,
+    renderCacheMaxEntries: config.renderCacheMaxEntries ?? 32,
     unitContentCommitTimeoutMs: config.unitContentCommitTimeoutMs ?? 5_000,
     stateCacheTtlMs: config.stateCacheTtlMs ?? 1_000,
     unitCacheTtlMs: config.unitCacheTtlMs ?? 5_000,
@@ -159,6 +179,8 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     screenshotMaxPixels: resolved.screenshotMaxPixels,
     resourceDownloadTimeoutMs: resolved.resourceDownloadTimeoutMs,
     resourceOperationTimeoutMs: resolved.resourceOperationTimeoutMs,
+    renderCacheTtlMs: resolved.renderCacheTtlMs,
+    renderCacheMaxEntries: resolved.renderCacheMaxEntries,
     unitContentCommitTimeoutMs: resolved.unitContentCommitTimeoutMs,
     stateCacheTtlMs: resolved.stateCacheTtlMs,
     unitCacheTtlMs: resolved.unitCacheTtlMs
@@ -177,6 +199,16 @@ function resolveResourceCacheRoot(configured: string | undefined): string {
     return resolve(configured)
   }
   return join(resolveDshHome(), 'cache', 'dsh-univer-office', 'resources')
+}
+
+function resolveRenderCacheRoot(configured: string | undefined): string {
+  if (configured !== undefined) {
+    if (configured.trim().length === 0 || !isAbsolute(configured)) {
+      throw new Error('univer: renderCacheRoot must be a non-empty absolute path')
+    }
+    return resolve(configured)
+  }
+  return join(resolveDshHome(), 'cache', 'dsh-univer-office', 'render')
 }
 
 /** A relative browser path would silently depend on the Host process working directory. */

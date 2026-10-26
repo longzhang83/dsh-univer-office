@@ -174,6 +174,8 @@ export interface ScreenshotServiceResult {
     readonly unitId: string
     readonly unitType: UniverUnitKind
     readonly images: readonly ScreenshotServiceImage[]
+    /** Present when the images came from the Provider render cache. */
+    readonly cached?: boolean
   }
 }
 

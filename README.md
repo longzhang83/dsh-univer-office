@@ -209,6 +209,10 @@ The defaults are designed for local use: the service starts at port `9080`. If t
 | `resourceCacheRoot` | `$DSH_HOME/cache/dsh-univer-office/resources` | Persistent downloaded-SVG cache; falls back to `~/.dsh` when `DSH_HOME` is unset |
 | `resourceDownloadTimeoutMs` | `15000` | Timeout for one SVG resource download |
 | `resourceOperationTimeoutMs` | `120000` | Overall timeout for one resource-library tool operation |
+| `renderCache` | `true` | Cache screenshot and PDF render artifacts; invalidated by file and Unit head revisions |
+| `renderCacheRoot` | `$DSH_HOME/cache/dsh-univer-office/render` | Persistent render artifact cache; falls back to `~/.dsh` when `DSH_HOME` is unset |
+| `renderCacheTtlMs` | `300000` | Maximum lifetime of one cached render artifact |
+| `renderCacheMaxEntries` | `32` | Maximum cached render artifacts kept by LRU eviction |
 | `tools` | `true` | Enable agent editing capabilities |
 | `skills` | `true` | Enable bundled task guidance |
 | `telemetry` | `true` | Send anonymous product telemetry |

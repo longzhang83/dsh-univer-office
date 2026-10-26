@@ -406,7 +406,12 @@ function screenshotMetadata(image: ScreenshotImage): JsonValue {
   }
 }
 
-async function writePdf(output: string, bytes: Uint8Array, signal?: AbortSignal): Promise<void> {
+/** Write PDF bytes atomically; reused to publish cached artifacts to authorized outputs. */
+export async function writePdf(
+  output: string,
+  bytes: Uint8Array,
+  signal?: AbortSignal
+): Promise<void> {
   await mkdir(dirname(output), { recursive: true })
   const temporary = `${output}.${String(process.pid)}.${randomUUID()}.tmp`
   try {

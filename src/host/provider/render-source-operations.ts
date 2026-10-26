@@ -21,6 +21,17 @@ interface RenderSourceRecord {
   readonly unitData: { [key: string]: JsonValue }
 }
 
+/** One assembled render target plus the head revisions that pin its content. */
+export interface LoadedRenderSource {
+  readonly source: UniverRenderUnit
+  /**
+   * Sorted `(unitId, headRevision)` pairs covering the primary Unit and every
+   * formula-reference and embedded dependency. `undefined` when any revision
+   * cannot be determined; callers must skip caching rather than risk a stale hit.
+   */
+  readonly revisions: readonly (readonly [string, number])[] | undefined
+}
+
 /** Assemble one render target with dependency Units and authorized embedded image bytes. */
 export class RenderSourceOperations {
   constructor(
@@ -34,7 +45,7 @@ export class RenderSourceOperations {
     unitId: string,
     worktreeId: string | undefined,
     signal?: AbortSignal
-  ): Promise<UniverRenderUnit> {
+  ): Promise<LoadedRenderSource> {
     const primary = await this.unitContent.renderSource(gateway, file, unitId, worktreeId, signal)
     const client = new GatewayClient(gateway, this.gatewayRequestTimeoutMs)
     const listing =
@@ -45,6 +56,7 @@ export class RenderSourceOperations {
     const formulaIds = externalReferenceUnitIds(primary.unitData)
     const embeddedIds = embeddedUnitIds(primary.unitData)
     const formulaReferenceUnits: UniverRenderFormulaReferenceUnit[] = []
+    const dependencyIds: string[] = []
     const formulaSet = new Set<string>()
     for (const dependencyId of formulaIds) {
       signal?.throwIfAborted()
@@ -64,6 +76,7 @@ export class RenderSourceOperations {
         signal
       )
       formulaReferenceUnits.push(asFormulaReferenceUnit(source))
+      dependencyIds.push(dependencyId)
       formulaSet.add(dependencyId)
     }
 
@@ -77,14 +90,16 @@ export class RenderSourceOperations {
           await this.unitContent.renderSource(gateway, file, dependencyId, worktreeId, signal)
         )
       )
+      dependencyIds.push(dependencyId)
     }
 
     const source = asRenderUnit(primary, formulaReferenceUnits, embeddedUnits)
-    return resolveUnitScreenshotImageAssets(
+    const withAssets = await resolveUnitScreenshotImageAssets(
       source,
       assetResolver(gateway, file, worktreeId, this.gatewayRequestTimeoutMs),
       signal
     )
+    return { source: withAssets, revisions: renderSourceRevisions(units, unitId, dependencyIds) }
   }
 }
 
@@ -98,6 +113,28 @@ function asRenderUnit(
     ...(embeddedUnits.length === 0 ? {} : { embeddedUnits })
   }
   return { ...asEmbeddedUnit(source), ...dependencies }
+}
+
+/**
+ * Pin the rendered content to the primary and dependency head revisions. Any
+ * missing Unit record makes the revisions unusable, which disables caching
+ * instead of allowing a key that could outlive a content change.
+ */
+function renderSourceRevisions(
+  units: readonly GatewayUnit[],
+  primaryId: string,
+  dependencyIds: readonly string[]
+): readonly (readonly [string, number])[] | undefined {
+  const pairs: [string, number][] = []
+  const seen = new Set<string>()
+  for (const unitId of [primaryId, ...dependencyIds]) {
+    if (seen.has(unitId)) continue
+    seen.add(unitId)
+    const unit = units.find((candidate) => candidate.unitId === unitId)
+    if (unit === undefined) return undefined
+    pairs.push([unitId, unit.headRev])
+  }
+  return pairs.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
 }
 
 function asEmbeddedUnit(source: RenderSourceRecord): UniverRenderEmbeddedUnit {

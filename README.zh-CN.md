@@ -209,6 +209,10 @@ DSH 会自动选择这些工具，日常使用不需要手动调用。
 | `resourceCacheRoot` | `$DSH_HOME/cache/dsh-univer-office/resources` | 下载 SVG 资源的持久缓存目录；未设置 `DSH_HOME` 时使用 `~/.dsh` |
 | `resourceDownloadTimeoutMs` | `15000` | 单个 SVG 资源下载超时 |
 | `resourceOperationTimeoutMs` | `120000` | 一次资源库工具操作的总超时 |
+| `renderCache` | `true` | 缓存截图与 PDF 渲染产物；按文件与 Unit head revision 失效 |
+| `renderCacheRoot` | `$DSH_HOME/cache/dsh-univer-office/render` | 渲染产物持久缓存目录；未设置 `DSH_HOME` 时使用 `~/.dsh` |
+| `renderCacheTtlMs` | `300000` | 单个渲染产物的最长缓存时间 |
+| `renderCacheMaxEntries` | `32` | 按 LRU 淘汰保留的渲染产物数量上限 |
 | `tools` | `true` | 启用 Agent 编辑能力 |
 | `skills` | `true` | 启用内置任务指引 |
 | `telemetry` | `true` | 发送匿名产品遥测 |

@@ -1,5 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { createStandardApiReference, type ApiReference } from '@univer-cli/api-reference'
+import { Buffer } from 'node:buffer'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { resolve } from 'node:path'
 import type { ResolvedConfig } from '../config.ts'
 import type { WorktreeActionResult } from '../../shared/wire/actions.ts'
 import type { FileState, WorktreeState, ChangedUnit } from '../../shared/wire/state.ts'
@@ -20,7 +23,9 @@ import type {
   LintUnitLayoutRequest,
   PrintPdfUnitRequest,
   ResourceOperationRequest,
+  ScreenshotServiceImage,
   ScreenshotServiceResult,
+  ScreenshotTarget,
   ScreenshotUnitRequest,
   CompileSvgRequest,
   JsonValue,
@@ -39,8 +44,9 @@ import { GatewaySupervisor } from '../processes/gateway/supervisor.ts'
 import { UnitContentOperations } from './unit-content-operations.ts'
 import { StateCache } from './state-cache.ts'
 import { WorktreeOperations } from './worktree-operations.ts'
-import { RenderOperations } from './render-operations.ts'
+import { RenderOperations, writePdf } from './render-operations.ts'
 import { RenderSourceOperations } from './render-source-operations.ts'
+import { RenderArtifactCache, assertCachedImageName, renderCacheKey } from './render-cache.ts'
 import { ResourceOperations } from './resource-operations.ts'
 
 /** Local Service Provider backed by the bundled Gateway and Unit content worker. */
@@ -50,6 +56,7 @@ export class GatewayUniverService extends UniverService {
   private readonly worktrees: WorktreeOperations
   private readonly render: RenderOperations
   private readonly renderSources: RenderSourceOperations
+  private readonly renderCache: RenderArtifactCache | undefined
   private readonly resourceOperations: ResourceOperations
   private readonly stateCache: StateCache<string, FileState>
   private readonly unitCache: StateCache<string, readonly ChangedUnit[]>
@@ -75,6 +82,14 @@ export class GatewayUniverService extends UniverService {
       this.unitContent,
       config.gatewayRequestTimeoutMs
     )
+    this.renderCache =
+      config.renderCache === false
+        ? undefined
+        : new RenderArtifactCache(
+            config.renderCacheRoot,
+            config.renderCacheMaxEntries,
+            config.renderCacheTtlMs
+          )
     this.resourceOperations = new ResourceOperations(
       config.resourceCacheRoot,
       config.resourceDownloadTimeoutMs
@@ -353,27 +368,94 @@ export class GatewayUniverService extends UniverService {
       assertAuthorizedPath(request.outputWorkspace, request.output, false)
     ])
     const gateway = await this.requireGateway()
-    const source = await this.renderSources.load(
+    const loaded = await this.renderSources.load(
       gateway,
       request.file,
       request.unitId,
       request.worktreeId,
       signal
     )
-    const result = await this.render.screenshot({
-      source,
-      output: request.output,
+    const cacheKey = this.renderCacheKeyFor({
+      kind: 'screenshot',
+      file: request.file,
+      unitId: request.unitId,
+      worktreeId: request.worktreeId,
+      revisions: loaded.revisions,
+      target: request.target,
       maxPages: this.config.screenshotMaxPages,
-      maxPixels: this.config.screenshotMaxPixels,
-      ...(request.target === undefined ? {} : { target: request.target }),
-      ...(signal === undefined ? {} : { signal })
+      maxPixels: this.config.screenshotMaxPixels
     })
-    await Promise.all(
-      result.images.map(async (image) => {
-        await assertAuthorizedPath(request.outputWorkspace, image.path, true)
+    if (this.renderCache === undefined || cacheKey === undefined) {
+      const result = await this.render.screenshot({
+        source: loaded.source,
+        output: request.output,
+        maxPages: this.config.screenshotMaxPages,
+        maxPixels: this.config.screenshotMaxPixels,
+        ...(request.target === undefined ? {} : { target: request.target }),
+        ...(signal === undefined ? {} : { signal })
+      })
+      await Promise.all(
+        result.images.map(async (image) => {
+          await assertAuthorizedPath(request.outputWorkspace, image.path, true)
+        })
+      )
+      return { ok: true, operation: 'screenshot', file: request.file, result }
+    }
+    const { entry, hit } = await this.renderCache.getOrProduce(cacheKey, async () => {
+      const rendered = await this.render.screenshot({
+        source: loaded.source,
+        output: request.output,
+        maxPages: this.config.screenshotMaxPages,
+        maxPixels: this.config.screenshotMaxPixels,
+        ...(request.target === undefined ? {} : { target: request.target }),
+        ...(signal === undefined ? {} : { signal })
+      })
+      return {
+        kind: 'screenshot',
+        images: rendered.images.map((image) => ({
+          name: image.name,
+          width: image.width,
+          height: image.height,
+          metadata: image.metadata,
+          bytes: Buffer.from(image.data, 'base64')
+        }))
+      }
+    })
+    if (entry.kind !== 'screenshot') {
+      throw new UniverError(
+        'Render cache returned a mismatched artifact kind.',
+        'RENDER_CACHE_INVALID'
+      )
+    }
+    // A fresh render already wrote the PNGs; a hit republishes the cached bytes.
+    if (hit) await writeCachedScreenshotImages(request.output, entry.images, signal)
+    const images = await Promise.all(
+      entry.images.map(async (image): Promise<ScreenshotServiceImage> => {
+        assertCachedImageName(image.name)
+        const path = resolve(request.output, image.name)
+        await assertAuthorizedPath(request.outputWorkspace, path, true)
+        return {
+          data: image.bytes.toString('base64'),
+          height: image.height,
+          mediaType: 'image/png',
+          name: image.name,
+          path,
+          width: image.width,
+          metadata: image.metadata
+        }
       })
     )
-    return { ok: true, operation: 'screenshot', file: request.file, result }
+    return {
+      ok: true,
+      operation: 'screenshot',
+      file: request.file,
+      result: {
+        unitId: request.unitId,
+        unitType: loaded.source.unitType,
+        images,
+        ...(hit ? { cached: true } : {})
+      }
+    }
   }
 
   /** Print one explicit Unit from trunk or a worktree to PDF. */
@@ -386,20 +468,64 @@ export class GatewayUniverService extends UniverService {
       assertAuthorizedPath(request.outputWorkspace, request.output, false)
     ])
     const gateway = await this.requireGateway()
-    const source = await this.renderSources.load(
+    const loaded = await this.renderSources.load(
       gateway,
       request.file,
       request.unitId,
       request.worktreeId,
       signal
     )
-    const result = await this.render.printPdf({
-      source,
-      output: request.output,
-      ...(signal === undefined ? {} : { signal })
+    const cacheKey = this.renderCacheKeyFor({
+      kind: 'pdf',
+      file: request.file,
+      unitId: request.unitId,
+      worktreeId: request.worktreeId,
+      revisions: loaded.revisions
     })
-    await assertAuthorizedPath(request.outputWorkspace, result.output, true)
-    return { ok: true, operation: 'print-pdf', file: request.file, result }
+    if (this.renderCache === undefined || cacheKey === undefined) {
+      const result = await this.render.printPdf({
+        source: loaded.source,
+        output: request.output,
+        ...(signal === undefined ? {} : { signal })
+      })
+      await assertAuthorizedPath(request.outputWorkspace, result.output, true)
+      return { ok: true, operation: 'print-pdf', file: request.file, result }
+    }
+    const { entry, hit } = await this.renderCache.getOrProduce(cacheKey, async () => {
+      const printed = await this.render.printPdf({
+        source: loaded.source,
+        output: request.output,
+        ...(signal === undefined ? {} : { signal })
+      })
+      return {
+        kind: 'pdf',
+        bytes: await readFile(request.output),
+        pageCount: printed.pageCount,
+        unitId: printed.unitId,
+        unitType: printed.unitType
+      }
+    })
+    if (entry.kind !== 'pdf') {
+      throw new UniverError(
+        'Render cache returned a mismatched artifact kind.',
+        'RENDER_CACHE_INVALID'
+      )
+    }
+    // A fresh render already wrote the PDF; a hit republishes the cached bytes.
+    if (hit) await writePdf(request.output, entry.bytes, signal)
+    await assertAuthorizedPath(request.outputWorkspace, request.output, true)
+    return {
+      ok: true,
+      operation: 'print-pdf',
+      file: request.file,
+      result: {
+        output: request.output,
+        pageCount: entry.pageCount,
+        unitId: entry.unitId,
+        unitType: entry.unitType,
+        ...(hit ? { cached: true } : {})
+      }
+    }
   }
 
   /** Compile one SVG and commit the generated Slide mutations to a draft worktree. */
@@ -474,6 +600,7 @@ export class GatewayUniverService extends UniverService {
   async dispose(): Promise<void> {
     this.stateCache.clear()
     this.unitCache.clear()
+    await this.renderCache?.clear()
     await this.gatewaySupervisor.dispose()
   }
 
@@ -577,11 +704,64 @@ export class GatewayUniverService extends UniverService {
     this.unitCache.delete(`${file}\u0000${worktreeId}`)
   }
 
+  /**
+   * Compute the artifact cache key, or `undefined` to render uncached. Content
+   * mutations are captured by the head revisions in the key, so no explicit
+   * invalidation hook is needed; without reliable revisions there is no safe
+   * staleness bound and the render must run fresh.
+   */
+  private renderCacheKeyFor(input: {
+    readonly kind: 'screenshot' | 'pdf'
+    readonly file: string
+    readonly unitId: string
+    readonly worktreeId: string | undefined
+    readonly revisions: readonly (readonly [string, number])[] | undefined
+    readonly target?: ScreenshotTarget
+    readonly maxPages?: number
+    readonly maxPixels?: number
+  }): string | undefined {
+    if (this.renderCache === undefined) return undefined
+    if (input.revisions === undefined || input.revisions.length === 0) return undefined
+    return renderCacheKey({
+      kind: input.kind,
+      file: input.file,
+      unitId: input.unitId,
+      ...(input.worktreeId === undefined ? {} : { worktreeId: input.worktreeId }),
+      revisions: input.revisions,
+      ...(input.target === undefined ? {} : { target: input.target }),
+      ...(input.maxPages === undefined ? {} : { maxPages: input.maxPages }),
+      ...(input.maxPixels === undefined ? {} : { maxPixels: input.maxPixels })
+    })
+  }
+
   private async requireGateway(): Promise<string> {
     const available = await this.ensureGateway()
     if (!available.ok) throw new UniverError(available.reason, 'GATEWAY_UNAVAILABLE')
     return available.gateway
   }
+}
+
+/** Republish cached PNG bytes into the authorized output directory. */
+async function writeCachedScreenshotImages(
+  output: string,
+  images: readonly {
+    readonly name: string
+    readonly bytes: Buffer
+  }[],
+  signal?: AbortSignal
+): Promise<void> {
+  await mkdir(output, { recursive: true })
+  await Promise.all(
+    images.map(async (image) => {
+      signal?.throwIfAborted()
+      assertCachedImageName(image.name)
+      await writeFile(
+        resolve(output, image.name),
+        image.bytes,
+        signal === undefined ? undefined : { signal }
+      )
+    })
+  )
 }
 
 function unitResult(unit: ReturnType<typeof mapUnits>[number]): { [key: string]: JsonValue } {

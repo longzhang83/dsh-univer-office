@@ -1,0 +1,142 @@
+name: Release to npm
+
+run-name: ${{ inputs.latest_version && format('Set npm latest to {0}', inputs.latest_version) || format('Release {0} to npm{1}', inputs.version || github.ref_name, inputs.dry_run && ' (dry-run)' || '') }}
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to publish (e.g. 0.2.0-alpha). Leave empty to use package.json.
+        required: false
+        type: string
+      dry_run:
+        description: Build and verify without publishing
+        required: false
+        type: boolean
+        default: true
+      latest_version:
+        description: Existing npm version to assign to the latest dist-tag; skips the release job.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dsh-univer-office-release
+  cancel-in-progress: false
+
+jobs:
+  retag-latest:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.latest_version != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      TARGET_VERSION: ${{ inputs.latest_version }}
+
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Validate published version
+        shell: bash
+        run: |
+          if [[ ! "$TARGET_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid npm version: $TARGET_VERSION" >&2
+            exit 1
+          fi
+          PUBLISHED_VERSION="$(npm view "dsh-univer-office@$TARGET_VERSION" version --registry=https://registry.npmjs.org/)"
+          test "$PUBLISHED_VERSION" = "$TARGET_VERSION"
+
+      - name: Set npm latest dist-tag
+        run: npm dist-tag add "dsh-univer-office@$TARGET_VERSION" latest --registry=https://registry.npmjs.org/
+
+      - name: Verify npm latest dist-tag
+        shell: bash
+        run: |
+          for attempt in {1..10}; do
+            LATEST_VERSION="$(npm view dsh-univer-office dist-tags.latest --registry=https://registry.npmjs.org/)"
+            if [ "$LATEST_VERSION" = "$TARGET_VERSION" ]; then
+              exit 0
+            fi
+            echo "Waiting for npm dist-tag propagation ($attempt/10): latest is $LATEST_VERSION"
+            sleep 3
+          done
+          echo "npm latest did not converge to $TARGET_VERSION" >&2
+          exit 1
+
+      - name: Summary
+        run: |
+          echo "## npm latest dist-tag" >> "$GITHUB_STEP_SUMMARY"
+          echo "- package: dsh-univer-office" >> "$GITHUB_STEP_SUMMARY"
+          echo "- latest: $TARGET_VERSION" >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.latest_version == '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            # Input overrides package.json (e.g. re-publishing a bumped version).
+            node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json'));p.version='${{ inputs.version }}';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
+          fi
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: pnpm run test
+
+      - name: Build and stage the published package
+        run: bash scripts/build-dist.sh
+
+      - name: Publish to npm
+        if: ${{ !inputs.dry_run }}
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if [[ "$VERSION" == *"-"* ]]; then
+            NPM_TAG="alpha"
+          else
+            NPM_TAG="latest"
+          fi
+          npm publish --access public --tag "$NPM_TAG" ./dist/univer
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "## Release ${{ steps.version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- dry-run: ${{ inputs.dry_run }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- published: ${{ inputs.dry_run && 'no' || 'yes' }}" >> "$GITHUB_STEP_SUMMARY"

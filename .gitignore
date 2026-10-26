@@ -1,0 +1,10 @@
+# Generated build artifacts — never commit these.
+# lib/, the Viewer, the worker, and the Gateway are built from src/ over the SDK:
+#   pnpm run build
+dist/
+/lib/
+node_modules/
+/artifacts/
+*.tgz
+*.zip
+*.tsbuildinfo

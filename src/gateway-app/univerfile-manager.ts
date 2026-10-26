@@ -164,6 +164,9 @@ export class UniverfileManager {
       collab: this._createCollab(normalized, create),
       events: new EventHub()
     }
+    // Pure changeset edits produce no lifecycle event of their own; bridge
+    // trunk commits from the authority into the hub (debounced unit_updated).
+    univerfile.collab.attachEventHub(univerfile.events)
     this._univerfiles.set(normalized, { univerfile, lastAccessMs: Date.now() })
     return univerfile
   }

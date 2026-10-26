@@ -111,6 +111,46 @@ patched; only their unavailable dependencies are.
 - Cheap Unit-level summary derived from pinned heads and the changeset stream **without materializing snapshots** (added/removed/unchanged/changed + changeset/mutation counts). Semantic block-level statistics honestly report `unavailable: requires-semantic-comparison`; the fine-grained `/diff` endpoint is unchanged and still used on demand.
 - 2 s wall-clock budget with per-Unit deadline; budget-exceeded degrades gracefully; results cached per comparisonId with stale overlay on live head changes.
 
+## Round 2 follow-ups
+
+Three targeted follow-ups closing known leftovers from Round 1.
+
+### F1. Asset fingerprints folded into the render-cache key
+
+An in-place embedded-image replacement (same `assetId` slot, unchanged head revisions) could be served stale from the render cache within its TTL. Fix is a lightweight fingerprint, not per-file content re-hashing of stored assets:
+
+- `RenderSourceOperations.load` wraps the asset resolver it already installs: every resolved asset records a SHA-256 of the **in-memory** bytes it hands to the renderer (`null` = resolved missing). Zero extra IO — the bytes were already fetched during assembly.
+- `RenderCacheKeyInput.assets` (sorted `(source, digest | null)` pairs) is part of the key; `KEY_VERSION` bumped to 2 (old entries simply never match).
+- Missing fingerprints (any asset lookup failed) disable caching, mirroring the missing-revisions policy; `renderCacheKeyFor` enforces this at both call sites (screenshot + PDF).
+- 3 new tests in `test/render-cache-smoke.mjs`: key changes on in-place replacement, on asset appear/disappear without a revision move, and a behavioural cache miss on fingerprint change under identical revisions.
+
+### F2. Payload compression extended to sheet_blocks
+
+The `univer-z1:` gzip codec now also covers Sheet-block storage columns; read paths already probe the marker prefix, so old plaintext rows stay readable and nothing migrates:
+
+- `collaboration-database-adapter.ts`: `createUnit` / `saveSnapshot` / `saveCheckpoint` block payloads (collaboration_sheet_blocks.payload_json) — was `encodePayloadJson`, now `encodeStoredPayload`.
+- `worktree-database-adapter.ts`: `collaboration_worktree_unit_seeds.sheet_blocks_json` and `collaboration_worktree_unit_merge_artifacts.sheet_blocks_json` — same switch; the seed-equality retry path compares decoded objects, so it is compression-transparent.
+- **Skipped on purpose**: asset blobs (`asset-store.ts`) and resource plugin payloads stay plain. Asset bytes are raw (typically already-compressed) image media — gzip adds CPU for no size win — and deduplication already happens through the content-addressed digest table. Rationale documented in `payload-codec.ts` and `asset-store.ts`.
+- The optimizer (`univerfile-optimizer.ts`) already lists these columns as `generic` payloads and decodes via the marker prefix, so optimize round-trips compressed rows unchanged.
+
+### F3. Changeset edits now push `unit_updated` (investigated, implemented)
+
+Gap: Round 1 WS push reuses Gateway lifecycle events, but pure changeset submissions (Agent writes through the SDK collaboration service) emit none, so push-mode Clients refreshed only on the next lifecycle event or reconnect.
+
+**Investigation**: the SDK `UniverCollabService` has no commit callback/event of its own, **but the persistence boundary is inside the Gateway**: trunk changesets are durably committed by the CLI-owned `UniverfileSQLiteDatabaseAdapter.commitChangeset` (worktree draft commits go through the worktree adapter and are covered by the merge/ready lifecycle events). No upstream SDK change is needed — the hook point is our own database adapter, so this was implemented rather than filed as an upstream requirement.
+
+Implementation (small, additive):
+
+- `UniverfileSQLiteDatabaseAdapter.setChangesetCommitListener(fn)`: fired outside the write transaction, only on `committed`, listener faults swallowed (best-effort, never fails the commit).
+- `CollabService.attachEventHub(events)`: registers a **500 ms per-Unit debounce** (bursts merge into the newest head) and emits the existing `{ type: 'unit_updated', unitId, name, headRev }` contract event on the univerfile channel — identifiers only, no content. Deleted units inside the window are skipped.
+- `UniverfileManager._open` performs the one-line wiring; no hub attached (e.g. standalone runtimes) → nothing emitted, polling fallback unaffected. Timers are cleared on `dispose`.
+
+### Verification status (Round 2)
+
+- ✅ esbuild syntax validation on all changed TS files (9 source + 1 test)
+- ✅ **55 behaviour tests, 55 pass / 0 fail** (52 existing + 3 new asset-fingerprint cases), stable across runs
+- ⚠️ Not run: `pnpm typecheck` / build / integration tests (unchanged environment constraint)
+
 ## Deferred (documented, not implemented)
 
 - CPU-heavy tasks (diff/materialization) off the Gateway event loop via `worker_threads`

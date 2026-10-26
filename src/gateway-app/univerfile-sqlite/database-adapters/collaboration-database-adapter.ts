@@ -114,6 +114,7 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
   private readonly _database: Database.Database
   private readonly _ownsConnection: boolean
   private _disposed = false
+  private _changesetCommitListener: ((unitId: string, headRevision: number) => void) | undefined
 
   constructor(options: UniverfileSQLiteDatabaseAdapterOptions) {
     validateOptions(options)
@@ -472,6 +473,18 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
     })
   }
 
+  /**
+   * Register a listener invoked after every durably committed trunk changeset.
+   * The SDK collaboration service has no commit callback of its own, so the
+   * Gateway hooks its own database adapter to push change notifications
+   * (e.g. debounced lifecycle events). Pass `undefined` to detach.
+   */
+  public setChangesetCommitListener(
+    listener: ((unitId: string, headRevision: number) => void) | undefined
+  ): void {
+    this._changesetCommitListener = listener
+  }
+
   async commitChangeset(
     context: DatabaseContext,
     input: CommitChangesetInput
@@ -486,7 +499,7 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
     // Encoded outside the write transaction so compression CPU never lengthens the write lock.
     const payload = this._encodeStored(changeset)
 
-    return this._transaction(() => {
+    const result = await this._transaction(() => {
       const unit = this._getActiveUnitRow(changeset.unitID)
       if (!unit) {
         throw new CollabError('UNIT_NOT_FOUND', 'Cannot commit to a missing unit')
@@ -542,6 +555,16 @@ export class UniverfileSQLiteDatabaseAdapter implements IDatabaseAdapter {
         headRevision: changeset.revision
       }
     })
+    // Fired outside the write transaction and only on success; the listener owns
+    // any debouncing. Listener faults must not fail the commit they report.
+    if (result.status === 'committed' && this._changesetCommitListener !== undefined) {
+      try {
+        this._changesetCommitListener(changeset.unitID, changeset.revision)
+      } catch {
+        // Notification is best-effort.
+      }
+    }
+    return result
   }
 
   async saveSnapshot(_context: DatabaseContext, input: SaveSnapshotInput): Promise<void> {

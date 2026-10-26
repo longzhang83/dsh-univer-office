@@ -72,6 +72,7 @@ import { unitAdapter } from './univer/unit-types.js'
 import { SnapshotCheckpointer } from './snapshot-checkpoint.js'
 import { KeyedLock } from './util/lock.js'
 import { GatewayExchangeService } from './exchange/gateway-exchange-service.js'
+import type { EventHub } from './transport/events.js'
 
 export interface CollabServiceOptions {
   /** `.univer` file path; ":memory:" (default) for an ephemeral store. */
@@ -88,6 +89,11 @@ const COMPARISON_SUMMARY_BUDGET_MS = 2_000
 const MAX_MATERIALIZED_MERGE_PREVIEWS = 32
 /** Upper bound on the Sheet blocks one merge preview response may carry. */
 const MAX_MERGE_PREVIEW_BLOCK_PAGE = 512
+/**
+ * Window that merges bursts of trunk changeset commits into one `unit_updated`
+ * push per Unit, so a rapid edit stream does not flood lifecycle subscribers.
+ */
+const UNIT_UPDATE_DEBOUNCE_MS = 500
 
 /**
  * One merge preview Unit after materialization.
@@ -183,6 +189,11 @@ export class CollabService {
   private readonly _comparisonSummaries = new Map<string, Promise<UnitComparisonDiffSummary>>()
   private readonly _materializedPreviews = new Map<string, Promise<MaterializedMergePreviewUnit>>()
   private readonly _checkpoints: SnapshotCheckpointer
+  private _events: EventHub | undefined
+  private readonly _pendingUnitUpdates = new Map<
+    string,
+    { readonly timer: ReturnType<typeof setTimeout>; headRevision: number }
+  >()
 
   public constructor(options: CollabServiceOptions = {}) {
     this.runtime = new GatewayFileRuntime(options)
@@ -190,6 +201,60 @@ export class CollabService {
     this.worktrees = new WorktreeCatalogCompatibility(this.runtime)
     this.exchange = new GatewayExchangeService(this)
     this._checkpoints = new SnapshotCheckpointer(this.runtime.trunkAdapter)
+  }
+
+  /**
+   * Wire the per-univerfile lifecycle event hub to trunk changeset commits.
+   *
+   * Pure changeset submissions (Agent writes through the SDK collaboration
+   * service) produce no lifecycle event of their own, so without this bridge a
+   * push-mode Client would only refresh on the next lifecycle event or
+   * reconnect. The hook lives inside the Gateway boundary — the CLI-owned
+   * database adapter is notified after every durable trunk commit — and emits
+   * a lightweight, debounced `unit_updated` (identifiers only, no content).
+   * Called once per univerfile by the UniverfileManager when both the authority
+   * and the hub exist; without it nothing is emitted and polling fallback
+   * keeps working.
+   */
+  public attachEventHub(events: EventHub): void {
+    this._events = events
+    this.runtime.trunkAdapter.setChangesetCommitListener((unitId, headRevision) => {
+      this._scheduleUnitUpdatedEvent(unitId, headRevision)
+    })
+  }
+
+  /** Keep the newest head per Unit and emit at most one event per debounce window. */
+  private _scheduleUnitUpdatedEvent(unitId: string, headRevision: number): void {
+    if (this._events === undefined) return
+    const pending = this._pendingUnitUpdates.get(unitId)
+    if (pending !== undefined) {
+      pending.headRevision = headRevision
+      return
+    }
+    const timer = setTimeout(() => {
+      // Read the latest head from the pending entry: later commits in the same
+      // window must win over the one that scheduled the timer.
+      const latest = this._pendingUnitUpdates.get(unitId)
+      this._pendingUnitUpdates.delete(unitId)
+      if (latest !== undefined) this._emitUnitUpdated(unitId, latest.headRevision)
+    }, UNIT_UPDATE_DEBOUNCE_MS)
+    this._pendingUnitUpdates.set(unitId, { timer, headRevision })
+  }
+
+  private _emitUnitUpdated(unitId: string, headRevision: number): void {
+    const events = this._events
+    if (events === undefined) return
+    const unit = this.listUnits().find((candidate) => candidate.unitId === unitId)
+    // The Unit may have been deleted inside the debounce window; a missing Unit has no update.
+    if (unit === undefined) return
+    events.emit('', { type: 'unit_updated', unitId, name: unit.name, headRev: headRevision })
+  }
+
+  private _clearPendingUnitUpdates(): void {
+    for (const pending of this._pendingUnitUpdates.values()) {
+      clearTimeout(pending.timer)
+    }
+    this._pendingUnitUpdates.clear()
   }
 
   public async createUnit(type: number, input: CreateUnitInput = {}): Promise<CreateUnitResult> {
@@ -1196,6 +1261,8 @@ export class CollabService {
   }
 
   public async dispose(): Promise<void> {
+    this._clearPendingUnitUpdates()
+    this._events = undefined
     this._comparisons.clear()
     this._materializedComparisons.clear()
     this._preparedComparisonContexts.clear()

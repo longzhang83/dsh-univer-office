@@ -43,8 +43,9 @@ type ProduceOutcome =
 /**
  * JSON payload that decides one render-cache key. Every input that can change
  * the rendered artifact belongs here: file identity, Unit scope, the head
- * revisions of the primary Unit and all render dependencies, the artifact
- * kind, and every output-affecting parameter.
+ * revisions of the primary Unit and all render dependencies, cheap fingerprints
+ * of the embedded image assets, the artifact kind, and every output-affecting
+ * parameter.
  */
 export interface RenderCacheKeyInput {
   readonly kind: 'screenshot' | 'pdf'
@@ -53,6 +54,14 @@ export interface RenderCacheKeyInput {
   readonly worktreeId?: string
   /** `(unitId, headRevision)` pairs; empty or missing revisions must disable caching. */
   readonly revisions: readonly (readonly [string, number])[]
+  /**
+   * Sorted `(source, digest)` fingerprints of the embedded image assets folded
+   * into the render source (`null` = asset resolved as missing). An in-place
+   * asset replacement can leave head revisions untouched, so renders without
+   * these fingerprints could serve stale images; `undefined` must disable
+   * caching, mirroring missing revisions.
+   */
+  readonly assets?: readonly (readonly [string, string | null])[]
   readonly target?: ScreenshotTarget
   readonly maxPages?: number
   readonly maxPixels?: number
@@ -78,12 +87,12 @@ type RenderCacheMeta =
       readonly file: string
     }
 
-const KEY_VERSION = 1
+const KEY_VERSION = 2
 const PDF_PAYLOAD = 'output.pdf'
 
 /**
  * Deterministic cache key for one render artifact. Object keys are sorted and
- * revision pairs are expected pre-sorted, so equal inputs always hash equal.
+ * revision/asset pairs are expected pre-sorted, so equal inputs always hash equal.
  */
 export function renderCacheKey(input: RenderCacheKeyInput): string {
   const payload: JsonValue = {
@@ -93,6 +102,9 @@ export function renderCacheKey(input: RenderCacheKeyInput): string {
     unitId: input.unitId,
     ...(input.worktreeId === undefined ? {} : { worktreeId: input.worktreeId }),
     revisions: input.revisions.map(([unitId, headRev]) => [unitId, headRev] as JsonValue),
+    ...(input.assets === undefined
+      ? {}
+      : { assets: input.assets.map(([source, digest]) => [source, digest] as JsonValue) }),
     ...(input.target === undefined ? {} : { target: input.target as unknown as JsonValue }),
     ...(input.maxPages === undefined ? {} : { maxPages: input.maxPages }),
     ...(input.maxPixels === undefined ? {} : { maxPixels: input.maxPixels })

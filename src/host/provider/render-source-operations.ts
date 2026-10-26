@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { ScreenshotImageAssetResolver } from '@univer-cli/unit-screenshot'
 import { resolveUnitScreenshotImageAssets } from '@univer-cli/unit-screenshot'
 import type {
@@ -30,6 +31,15 @@ export interface LoadedRenderSource {
    * cannot be determined; callers must skip caching rather than risk a stale hit.
    */
   readonly revisions: readonly (readonly [string, number])[] | undefined
+  /**
+   * Cheap asset fingerprints folded into the render-cache key: sorted
+   * `(source, digest)` pairs where `digest` hashes the in-memory asset bytes
+   * (`null` = asset resolved as missing). Head revisions do not move when an
+   * embedded image asset is replaced in place, so renders must not be cached
+   * without these. `undefined` when any asset lookup failed and the fingerprint
+   * set is incomplete; callers must skip caching, mirroring missing revisions.
+   */
+  readonly assetFingerprints: readonly (readonly [string, string | null])[] | undefined
 }
 
 /** Assemble one render target with dependency Units and authorized embedded image bytes. */
@@ -94,12 +104,24 @@ export class RenderSourceOperations {
     }
 
     const source = asRenderUnit(primary, formulaReferenceUnits, embeddedUnits)
+    // The resolver wraps the real fetcher so every asset byte that flows into
+    // the render is fingerprinted in memory; no extra asset IO is performed.
+    const tracking = { failed: false }
+    const digests = new Map<string, string | null>()
     const withAssets = await resolveUnitScreenshotImageAssets(
       source,
-      assetResolver(gateway, file, worktreeId, this.gatewayRequestTimeoutMs),
+      assetTrackingResolver(
+        assetResolver(gateway, file, worktreeId, this.gatewayRequestTimeoutMs),
+        digests,
+        tracking
+      ),
       signal
     )
-    return { source: withAssets, revisions: renderSourceRevisions(units, unitId, dependencyIds) }
+    return {
+      source: withAssets,
+      revisions: renderSourceRevisions(units, unitId, dependencyIds),
+      assetFingerprints: tracking.failed ? undefined : sortedFingerprints(digests)
+    }
   }
 }
 
@@ -208,6 +230,43 @@ function assetResolver(
       }
     }
   }
+}
+
+/**
+ * Wrap the real asset resolver so each resolved source records a fingerprint of
+ * the exact bytes that enter the render. A failed lookup marks the fingerprint
+ * set incomplete (the caller then disables caching) and rethrows unchanged.
+ */
+function assetTrackingResolver(
+  base: ScreenshotImageAssetResolver,
+  digests: Map<string, string | null>,
+  tracking: { failed: boolean }
+): ScreenshotImageAssetResolver {
+  return {
+    async resolve(input) {
+      try {
+        const resolved = await base.resolve(input)
+        digests.set(input.source, resolved === undefined ? null : sha256Hex(resolved.bytes))
+        return resolved
+      } catch (error) {
+        tracking.failed = true
+        throw error
+      }
+    }
+  }
+}
+
+/** Sorted `(source, digest)` pairs; duplicate sources keep the last resolution. */
+function sortedFingerprints(
+  digests: ReadonlyMap<string, string | null>
+): readonly (readonly [string, string | null])[] {
+  return [...digests.entries()].sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0
+  )
+}
+
+function sha256Hex(bytes: Uint8Array): string {
+  return createHash('sha256').update(bytes).digest('hex')
 }
 
 function externalReferenceUnitIds(unitData: Record<string, JsonValue>): readonly string[] {

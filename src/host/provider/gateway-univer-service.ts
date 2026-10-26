@@ -442,6 +442,7 @@ export class GatewayUniverService extends UniverService {
       unitId: request.unitId,
       worktreeId: request.worktreeId,
       revisions: loaded.revisions,
+      assets: loaded.assetFingerprints,
       target: request.target,
       maxPages: this.config.screenshotMaxPages,
       maxPixels: this.config.screenshotMaxPixels
@@ -541,7 +542,8 @@ export class GatewayUniverService extends UniverService {
       file: request.file,
       unitId: request.unitId,
       worktreeId: request.worktreeId,
-      revisions: loaded.revisions
+      revisions: loaded.revisions,
+      assets: loaded.assetFingerprints
     })
     if (this.renderCache === undefined || cacheKey === undefined) {
       const result = await this.render.printPdf({
@@ -792,9 +794,10 @@ export class GatewayUniverService extends UniverService {
 
   /**
    * Compute the artifact cache key, or `undefined` to render uncached. Content
-   * mutations are captured by the head revisions in the key, so no explicit
-   * invalidation hook is needed; without reliable revisions there is no safe
-   * staleness bound and the render must run fresh.
+   * mutations are captured by the head revisions in the key; in-place embedded
+   * asset replacements (which leave revisions untouched) are captured by the
+   * asset fingerprints. Without reliable revisions or fingerprints there is no
+   * safe staleness bound and the render must run fresh.
    */
   private renderCacheKeyFor(input: {
     readonly kind: 'screenshot' | 'pdf'
@@ -802,18 +805,21 @@ export class GatewayUniverService extends UniverService {
     readonly unitId: string
     readonly worktreeId: string | undefined
     readonly revisions: readonly (readonly [string, number])[] | undefined
+    readonly assets?: readonly (readonly [string, string | null])[] | undefined
     readonly target?: ScreenshotTarget
     readonly maxPages?: number
     readonly maxPixels?: number
   }): string | undefined {
     if (this.renderCache === undefined) return undefined
     if (input.revisions === undefined || input.revisions.length === 0) return undefined
+    if (input.assets === undefined) return undefined
     return renderCacheKey({
       kind: input.kind,
       file: input.file,
       unitId: input.unitId,
       ...(input.worktreeId === undefined ? {} : { worktreeId: input.worktreeId }),
       revisions: input.revisions,
+      assets: input.assets,
       ...(input.target === undefined ? {} : { target: input.target }),
       ...(input.maxPages === undefined ? {} : { maxPages: input.maxPages }),
       ...(input.maxPixels === undefined ? {} : { maxPixels: input.maxPixels })

@@ -72,6 +72,24 @@ describe('renderCacheKey', () => {
     assert.notEqual(before, after)
   })
 
+  it('changes when an embedded asset is replaced in place under the same revisions', () => {
+    const assets = [['asset-1', 'digest-a']]
+    const before = renderCacheKey({ ...BASE, assets })
+    const after = renderCacheKey({ ...BASE, assets: [['asset-1', 'digest-b']] })
+    assert.notEqual(before, after)
+    assert.notEqual(before, renderCacheKey(BASE))
+  })
+
+  it('changes when an embedded asset appears or disappears without a revision move', () => {
+    const withAsset = renderCacheKey({ ...BASE, assets: [['asset-1', 'digest-a']] })
+    // 404-style resolution: the asset is referenced but resolves as missing.
+    const missing = renderCacheKey({ ...BASE, assets: [['asset-1', null]] })
+    const without = renderCacheKey(BASE)
+    assert.notEqual(withAsset, missing)
+    assert.notEqual(withAsset, without)
+    assert.notEqual(missing, without)
+  })
+
   it('separates screenshot ranges, page caps, and pixel caps', () => {
     const plain = renderCacheKey(BASE)
     assert.notEqual(
@@ -169,6 +187,27 @@ describe('RenderArtifactCache', () => {
     })
     assert.equal(stale.hit, true)
     assert.equal(stale.entry.images[0].bytes.toString('utf8'), 'png-1')
+  })
+
+  it('serves a fresh render when an asset fingerprint changes under the same revisions', async () => {
+    const cache = new RenderArtifactCache(root, 8, 60_000)
+    let produced = 0
+    const produce = async () => screenshotEntry(`png-${String(++produced)}`)
+    const keyFor = (digest) => renderCacheKey({ ...BASE, assets: [['asset-1', digest]] })
+
+    const first = await cache.getOrProduce(keyFor('digest-a'), produce)
+    // In-place asset replacement: revisions did not move, the fingerprint did.
+    const replaced = await cache.getOrProduce(keyFor('digest-b'), produce)
+    assert.equal(replaced.hit, false)
+    assert.equal(produced, 2)
+    assert.equal(replaced.entry.images[0].bytes.toString('utf8'), 'png-2')
+
+    const repeat = await cache.getOrProduce(keyFor('digest-b'), async () => {
+      throw new Error('produce must not run on a hit')
+    })
+    assert.equal(repeat.hit, true)
+    assert.equal(repeat.entry.images[0].bytes.toString('utf8'), 'png-2')
+    assert.equal(first.hit, false)
   })
 
   it('evicts the least recently used entry once the cap is reached', async () => {
